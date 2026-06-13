@@ -117,23 +117,26 @@ def render():
         } for s in claude_suggs]
 
         # Step 1 result
-        match_result = db.query(GPT4MatchResult).filter_by(session_id=selected_id).first()
+        _mr = db.query(GPT4MatchResult).filter_by(session_id=selected_id).first()
+        match_result = {
+            "overall_score": _mr.overall_score,
+            "summary": _mr.summary,
+            "requirements_json": _mr.requirements_json,
+        } if _mr else None
 
         # Step 2 result
-        refined_rows = db.query(RefinedSuggestion).filter_by(session_id=selected_id).all()
         refined_map: dict[str, dict] = {
             r.suggestion_id: {
                 "id": r.id, "verdict": r.verdict.value,
                 "improved_text": r.improved_text,
                 "critique": r.critique, "is_applied": r.is_applied,
             }
-            for r in refined_rows
+            for r in db.query(RefinedSuggestion).filter_by(session_id=selected_id).all()
         }
 
         # Step 3 result
-        gpt4_suggs = db.query(GPT4Suggestion).filter_by(session_id=selected_id).all()
         gpt4_by_req: dict[str, list[dict]] = {}
-        for s in gpt4_suggs:
+        for s in db.query(GPT4Suggestion).filter_by(session_id=selected_id).all():
             gpt4_by_req.setdefault(s.requirement_id, []).append({
                 "id": s.id, "type": s.type.value,
                 "original_text": s.original_text,
@@ -161,7 +164,7 @@ def render():
         )
     with col_s1info:
         if step1_done:
-            st.caption(f"GPT-4o score: **{match_result.overall_score:.0%}** — click to re-run")
+            st.caption(f"GPT-4o score: **{match_result['overall_score']:.0%}** — click to re-run")
 
     if run_step1:
         if not resume_text or not jd_text:
@@ -196,11 +199,11 @@ def render():
         st.rerun()
 
     if step1_done and match_result:
-        scores_by_req = json.loads(match_result.requirements_json)
+        scores_by_req = json.loads(match_result["requirements_json"])
 
         col_gauge, col_detail = st.columns([1, 2])
         with col_gauge:
-            score = match_result.overall_score
+            score = match_result["overall_score"]
             fig = go.Figure(go.Indicator(
                 mode="gauge+number",
                 value=score * 100,
@@ -220,7 +223,7 @@ def render():
             st.plotly_chart(fig, use_container_width=True)
 
         with col_detail:
-            st.markdown(f"*{match_result.summary}*")
+            st.markdown(f"*{match_result['summary']}*")
             st.markdown("**Per-requirement scores**")
             for req in sorted(all_reqs, key=lambda r: scores_by_req.get(r["id"], {}).get("score", 1.0)):
                 r_data = scores_by_req.get(req["id"], {})

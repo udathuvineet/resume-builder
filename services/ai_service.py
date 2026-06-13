@@ -4,9 +4,22 @@ import re
 from typing import Generator
 
 import anthropic
+import openai as _openai_module
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 MODEL = "claude-opus-4-8"
+
+_openai_client: _openai_module.OpenAI | None = None
+
+
+def _get_openai() -> _openai_module.OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        key = os.environ.get("OPENAI_API_KEY")
+        if not key:
+            raise EnvironmentError("OPENAI_API_KEY is not set.")
+        _openai_client = _openai_module.OpenAI(api_key=key)
+    return _openai_client
 
 _ANALYSIS_SYSTEM = """You are an expert resume optimizer and ATS specialist. Analyze the provided resume(s) against the job description.
 
@@ -191,6 +204,61 @@ def stream_resume_generation(
     ) as stream:
         for text in stream.text_stream:
             yield text
+
+
+_REFINE_SYSTEM = """You are a senior resume consultant and hiring manager who is critically reviewing AI-generated resume suggestions.
+
+Your job: for each suggestion, decide whether it is:
+- "approved"  — already strong, specific, and well-targeted; keep Claude's version
+- "improved"  — directionally right but needs sharper wording, better metrics, more ATS-specific language, or stronger action verbs; provide a better version
+- "flagged"   — generic filler, unrealistic claim, doesn't actually address the gap, or could hurt the candidate
+
+Be honest and critical. Approve sparingly — most suggestions benefit from tightening.
+
+Return ONLY valid JSON (no markdown fences):
+{
+  "refinements": [
+    {
+      "suggestion_id": "<id>",
+      "verdict": "approved | improved | flagged",
+      "improved_text": "your rewritten version (only when verdict is improved, else null)",
+      "critique": "one or two sentences explaining your decision and what you changed or why it was flagged"
+    }
+  ]
+}"""
+
+
+def refine_suggestions_with_gpt4(
+    resume_text: str,
+    jd_text: str,
+    suggestions: list[dict],
+) -> dict:
+    oai = _get_openai()
+
+    sugg_block = "\n\n".join(
+        f"ID: {s['id']}\n"
+        f"Section: {s.get('section') or 'General'}\n"
+        f"Type: {s['type']}\n"
+        f"Requirement gap: {s.get('requirement_text', '')}\n"
+        + (f"Original text in resume: {s['original_text']}\n" if s.get('original_text') else "")
+        + f"Claude's suggestion: {s.get('edited_text') or s['suggested_text']}"
+        for s in suggestions
+    )
+
+    response = oai.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=4096,
+        messages=[
+            {"role": "system", "content": _REFINE_SYSTEM},
+            {"role": "user", "content": (
+                f"Job Description:\n{jd_text}\n\n"
+                f"Original Resume:\n{resume_text}\n\n"
+                f"Suggestions to review:\n{sugg_block}\n\n"
+                "Review every suggestion and return JSON."
+            )},
+        ],
+    )
+    return _parse_json(response.choices[0].message.content)
 
 
 def _parse_json(text: str) -> dict:

@@ -27,6 +27,12 @@ class AuditVerdict(str, enum.Enum):
     REMOVE = "remove"
 
 
+class RefineVerdict(str, enum.Enum):
+    APPROVED = "approved"
+    IMPROVED = "improved"
+    FLAGGED = "flagged"
+
+
 class UserProfile(Base):
     __tablename__ = "user_profile"
     id = Column(String, primary_key=True, default="default")
@@ -127,3 +133,18 @@ class ContentAuditItem(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("AnalysisSession", back_populates="audit_items")
+
+
+class RefinedSuggestion(Base):
+    __tablename__ = "refined_suggestions"
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("analysis_sessions.id", ondelete="CASCADE"), nullable=False)
+    suggestion_id = Column(String, ForeignKey("suggestions.id", ondelete="CASCADE"), nullable=False)
+    verdict = Column(SAEnum(RefineVerdict), nullable=False)
+    improved_text = Column(Text, nullable=True)
+    critique = Column(Text, nullable=False)
+    is_applied = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("AnalysisSession")
+    suggestion = relationship("Suggestion")

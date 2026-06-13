@@ -9,6 +9,7 @@ from database.models import (AnalysisSession, GPT4MatchResult, GPT4Suggestion,
                               RefineVerdict, RefinedSuggestion, Requirement,
                               Resume, Suggestion, SuggestionType)
 from services import ai_service
+from services.resume_generator import _label_lines
 
 _SUGGESTION_THRESHOLD = 0.8
 
@@ -39,6 +40,48 @@ def _save_gpt4_edit(sugg_id: str, key: str):
             s.edited_text = st.session_state[key]
 
 
+def _set_gpt4_weave_original(sugg_id: str, key: str):
+    val = st.session_state.get(key, "")
+    if not val:
+        return
+    with get_db() as db:
+        s = db.query(GPT4Suggestion).filter_by(id=sugg_id).first()
+        if s:
+            s.original_text = val
+            if not s.edited_text:
+                s.edited_text = val
+
+
+def _clear_gpt4_weave_original(sugg_id: str):
+    with get_db() as db:
+        s = db.query(GPT4Suggestion).filter_by(id=sugg_id).first()
+        if s:
+            s.original_text = None
+            s.edited_text = None
+
+
+def _parse_resume_bullets(resume_text: str) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    current = "General"
+    for line, label in _label_lines(resume_text):
+        s = line.strip()
+        if not s:
+            continue
+        if label == "section":
+            current = s
+        elif label in ("bullet", "body", "role"):
+            result.setdefault(current, []).append(s)
+    return result
+
+
+def _bullets_for_section(resume_bullets: dict[str, list[str]], section: str) -> list[str]:
+    sec_upper = (section or "").upper()
+    for key in resume_bullets:
+        if sec_upper in key.upper() or key.upper() in sec_upper:
+            return resume_bullets[key]
+    return [b for bullets in resume_bullets.values() for b in bullets]
+
+
 def _apply_refinement(refined_id: str, improved_text: str, sugg_id: str):
     with get_db() as db:
         r = db.query(RefinedSuggestion).filter_by(id=refined_id).first()
@@ -47,6 +90,96 @@ def _apply_refinement(refined_id: str, improved_text: str, sugg_id: str):
         s = db.query(Suggestion).filter_by(id=sugg_id).first()
         if s:
             s.edited_text = improved_text
+
+
+def _render_gpt4_suggestion(sugg: dict, resume_bullets: dict[str, list[str]]):
+    sugg_id  = sugg["id"]
+    sel_key  = f"g4sel_{sugg_id}"
+    edit_key = f"g4edit_{sugg_id}"
+    section  = sugg.get("section") or "General"
+    is_add   = sugg["type"] == "ADD"
+
+    col_check, col_label = st.columns([1, 10])
+    action_label = "Add to" if is_add else "Modify"
+    is_checked = col_check.checkbox(
+        "", value=sugg["is_selected"], key=sel_key,
+        on_change=_toggle_gpt4_sugg, args=(sugg_id, sel_key),
+        label_visibility="collapsed",
+    )
+    col_label.markdown(
+        f"**{action_label}** — `{section}`  \n"
+        f"{sugg['suggested_text']}"
+    )
+
+    active = is_checked or st.session_state.get(sel_key, sugg["is_selected"])
+    if not active:
+        st.markdown("")
+        return
+
+    if is_add:
+        mode_key = f"g4weave_mode_{sugg_id}"
+        has_target = bool(sugg.get("original_text"))
+        mode = st.radio(
+            "Apply as",
+            ["Add as new bullet point", "Weave into existing point"],
+            index=1 if has_target else 0,
+            key=mode_key,
+            horizontal=True,
+        )
+        if mode == "Weave into existing point":
+            bullets = _bullets_for_section(resume_bullets, section)
+            if not bullets:
+                st.caption("No existing bullets found in the resume to weave into.")
+            else:
+                target_key = f"g4weave_target_{sugg_id}"
+                placeholder = "— pick a bullet to blend this into —"
+                options = [placeholder] + bullets
+                current_original = sugg.get("original_text") or ""
+                current_idx = (bullets.index(current_original) + 1
+                               if current_original in bullets else 0)
+                st.selectbox(
+                    "Existing point to weave into",
+                    options=options,
+                    index=current_idx,
+                    key=target_key,
+                    on_change=_set_gpt4_weave_original,
+                    args=(sugg_id, target_key),
+                )
+                if has_target:
+                    st.caption(f"Original: *{current_original}*")
+                    st.text_area(
+                        "Edit blended version",
+                        value=sugg.get("edited_text") or current_original,
+                        height=90, key=edit_key,
+                        label_visibility="collapsed",
+                        on_change=_save_gpt4_edit,
+                        args=(sugg_id, edit_key),
+                    )
+                    st.caption("Edit the text above to blend the suggestion into the existing point.")
+        else:
+            if has_target:
+                _clear_gpt4_weave_original(sugg_id)
+            st.text_area(
+                "Edit new bullet text",
+                value=sugg.get("edited_text") or sugg["suggested_text"],
+                height=90, key=edit_key,
+                label_visibility="collapsed",
+                on_change=_save_gpt4_edit,
+                args=(sugg_id, edit_key),
+            )
+    else:
+        if sugg.get("original_text"):
+            st.caption(f"Replaces: *{sugg['original_text']}*")
+        st.text_area(
+            "Edit",
+            value=sugg.get("edited_text") or sugg["suggested_text"],
+            height=90, key=edit_key,
+            label_visibility="collapsed",
+            on_change=_save_gpt4_edit,
+            args=(sugg_id, edit_key),
+        )
+
+    st.markdown("")
 
 
 # ── Main render ───────────────────────────────────────────────────────────────
@@ -87,6 +220,7 @@ def render():
         resumes = db.query(Resume).order_by(Resume.order).all()
         resume_texts = [r.content for r in resumes]
         resume_text = resume_texts[0] if resume_texts else ""
+        resume_bullets = _parse_resume_bullets(resume_text)
 
         all_reqs = [
             {"id": r.id, "text": r.text, "match_score": r.match_score,
@@ -420,30 +554,6 @@ def render():
                     st.caption(f"Category: `{req['category']}`  •  Score: {score:.0%}")
                     st.markdown("---")
                     for sugg in suggs:
-                        sel_key  = f"g4sel_{sugg['id']}"
-                        edit_key = f"g4edit_{sugg['id']}"
-                        action = "Modify" if sugg["type"] == "MODIFY" else "Add"
-                        col_check, col_label = st.columns([1, 10])
-                        is_checked = col_check.checkbox(
-                            "", value=sugg["is_selected"], key=sel_key,
-                            on_change=_toggle_gpt4_sugg, args=(sugg["id"], sel_key),
-                            label_visibility="collapsed",
-                        )
-                        col_label.markdown(
-                            f"**{action}** `{sugg.get('section') or 'resume'}`  \n"
-                            f"{sugg['suggested_text']}"
-                        )
-                        if is_checked or st.session_state.get(sel_key, sugg["is_selected"]):
-                            if sugg.get("original_text"):
-                                st.caption(f"Replaces: *{sugg['original_text']}*")
-                            st.text_area(
-                                "Edit",
-                                value=sugg.get("edited_text") or sugg["suggested_text"],
-                                height=90, key=edit_key,
-                                label_visibility="collapsed",
-                                on_change=_save_gpt4_edit,
-                                args=(sugg["id"], edit_key),
-                            )
-                        st.markdown("")
+                        _render_gpt4_suggestion(sugg, resume_bullets)
         elif step3_done:
             st.success("GPT-4o had nothing new to add — Claude's suggestions already cover the gaps well.")

@@ -82,9 +82,44 @@ Return ONLY valid JSON (no markdown fences):
   ]
 }"""
 
+_GPT4_SUGGESTIONS_SYSTEM = """You are an expert resume writer and ATS optimizer. Generate specific, actionable suggestions to improve how a resume matches a job description.
+
+Write in clear, natural business English. Do not use:
+- Em dashes (—) or en dashes (–) as prose punctuation
+- Cliches like "spearheaded", "leveraged", "synergized", "passionate", "dynamic", "results-driven"
+- Excessive hyphens to connect thoughts mid-sentence
+
+Return ONLY a valid JSON object (no markdown fences):
+{
+  "suggestions_by_requirement": {
+    "<requirement_id>": [
+      {
+        "type": "MODIFY",
+        "original_text": "exact existing text from resume to replace",
+        "suggested_text": "improved version with relevant keywords and metrics",
+        "section": "Experience|Skills|Summary|Education|Projects"
+      },
+      {
+        "type": "ADD",
+        "original_text": null,
+        "suggested_text": "new content to add to the resume",
+        "section": "Skills"
+      }
+    ]
+  }
+}
+
+Use the exact requirement IDs provided. Be specific and ATS-optimized."""
+
 _GENERATION_SYSTEM = """You are an expert resume writer. Rewrite the provided resume incorporating all suggested improvements.
 
 Output plain text only — no markdown, no asterisks, no hashtags, no explanation.
+
+Language rules — write natural business English:
+- No em dashes (—) or en dashes (–) as prose punctuation inside bullet points or summaries
+- No AI cliches: spearheaded, leveraged, synergized, passionate, dynamic, results-driven, robust
+- No mid-sentence hyphens connecting thoughts (e.g. avoid "led the team - resulting in")
+- Use clear, direct sentences with strong action verbs (built, reduced, shipped, led, grew, cut)
 
 Strict format:
 1. Line 1: Full name only
@@ -158,6 +193,28 @@ def audit_resume_content(resume_text: str, jd_text: str) -> dict:
         }]
     )
     return _parse_json(response.content[0].text)
+
+
+def generate_suggestions_gpt4(requirements: list[dict], resume_texts: list[str]) -> dict:
+    oai = _get_openai()
+    resume_block = "\n\n---\n\n".join(resume_texts)
+    reqs_block = "\n\n".join(
+        f"ID: {r['id']}\nRequirement: {r['text']}\nScore: {r['match_score']:.0%}\nGap: {r['match_detail']}"
+        for r in requirements
+    )
+    response = oai.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=4096,
+        messages=[
+            {"role": "system", "content": _GPT4_SUGGESTIONS_SYSTEM},
+            {"role": "user", "content": (
+                f"Requirements needing improvement:\n{reqs_block}\n\n"
+                f"Resume:\n{resume_block}\n\n"
+                "Generate suggestions and return JSON."
+            )},
+        ],
+    )
+    return _parse_json(response.choices[0].message.content)
 
 
 def stream_resume_generation(

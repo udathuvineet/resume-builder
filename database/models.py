@@ -148,3 +148,21 @@ class RefinedSuggestion(Base):
 
     session = relationship("AnalysisSession")
     suggestion = relationship("Suggestion")
+
+
+class GPT4Suggestion(Base):
+    __tablename__ = "gpt4_suggestions"
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("analysis_sessions.id", ondelete="CASCADE"), nullable=False)
+    requirement_id = Column(String, ForeignKey("requirements.id", ondelete="CASCADE"), nullable=False)
+    original_text = Column(Text, nullable=True)
+    suggested_text = Column(Text, nullable=False)
+    edited_text = Column(Text, nullable=True)
+    is_selected = Column(Boolean, default=False)
+    type = Column(SAEnum(SuggestionType), default=SuggestionType.MODIFY)
+    section = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    session = relationship("AnalysisSession")
+    requirement = relationship("Requirement")

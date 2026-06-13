@@ -4,8 +4,8 @@ from datetime import datetime
 import streamlit as st
 
 from database.db import get_db
-from database.models import (AnalysisSession, Requirement, Resume,
-                              SessionStatus, Suggestion, UserProfile)
+from database.models import (AnalysisSession, GPT4Suggestion, Requirement,
+                              Resume, SessionStatus, Suggestion, UserProfile)
 from services import ai_service, resume_generator
 
 
@@ -103,7 +103,13 @@ def render():
             .filter_by(session_id=selected_id, is_selected=True)
             .all()
         )
-        req_ids = list({s.requirement_id for s in selected_suggs})
+        selected_gpt4 = (
+            db.query(GPT4Suggestion)
+            .filter_by(session_id=selected_id, is_selected=True)
+            .all()
+        )
+        all_selected = list(selected_suggs) + list(selected_gpt4)
+        req_ids = list({s.requirement_id for s in all_selected})
         req_rows = (
             db.query(Requirement)
             .filter(Requirement.id.in_(req_ids))
@@ -119,7 +125,7 @@ def render():
             "edited_text": s.edited_text,
             "section": s.section,
             "requirement_id": s.requirement_id,
-        } for s in selected_suggs]
+        } for s in all_selected]
 
         if not resumes:
             st.warning("Upload a resume in the **Library** tab first.")
@@ -137,7 +143,12 @@ def render():
             "location": profile_row.location or "" if profile_row else "",
         }
 
-    st.metric("Accepted improvements", len(sugg_data))
+    claude_count = len(selected_suggs)
+    gpt4_count = len(selected_gpt4)
+    col_m1, col_m2, col_m3 = st.columns(3)
+    col_m1.metric("Total accepted", len(sugg_data))
+    col_m2.metric("From Claude", claude_count)
+    col_m3.metric("From GPT-4o", gpt4_count)
 
     if not sugg_data:
         st.info(

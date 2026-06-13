@@ -22,6 +22,17 @@ class SuggestionType(str, enum.Enum):
     ADD = "ADD"
 
 
+class UserProfile(Base):
+    __tablename__ = "user_profile"
+    id = Column(String, primary_key=True, default="default")
+    name = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    linkedin = Column(String, nullable=True)
+    location = Column(String, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class SampleResume(Base):
     __tablename__ = "sample_resumes"
     id = Column(String, primary_key=True)

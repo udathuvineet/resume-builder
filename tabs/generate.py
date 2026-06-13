@@ -1,7 +1,7 @@
 import streamlit as st
 
 from database.db import get_db
-from database.models import AnalysisSession, Resume, SessionStatus, Suggestion
+from database.models import AnalysisSession, Resume, SessionStatus, Suggestion, UserProfile
 from services import ai_service, resume_generator
 
 
@@ -52,6 +52,14 @@ def render():
         primary_resume = resumes[0].content
         primary_bytes = bytes(resumes[0].pdf_data) if resumes[0].pdf_data else None
         primary_filename = resumes[0].filename
+        profile_row = db.query(UserProfile).filter_by(id="default").first()
+        profile = {
+            "name": profile_row.name or "" if profile_row else "",
+            "email": profile_row.email or "" if profile_row else "",
+            "phone": profile_row.phone or "" if profile_row else "",
+            "linkedin": profile_row.linkedin or "" if profile_row else "",
+            "location": profile_row.location or "" if profile_row else "",
+        }
 
     st.metric("Accepted improvements", len(sugg_data))
 
@@ -70,7 +78,7 @@ def render():
 
         st.subheader("Generated Resume")
         generated = st.write_stream(
-            ai_service.stream_resume_generation(primary_resume, sugg_data)
+            ai_service.stream_resume_generation(primary_resume, sugg_data, profile)
         )
         st.session_state["generated_resume"] = generated
         st.session_state["generated_resume_source"] = (primary_bytes, primary_filename)

@@ -103,7 +103,11 @@ def generate_suggestions(requirements: list[dict], resume_texts: list[str]) -> d
     return _parse_json(response.content[0].text)
 
 
-def stream_resume_generation(original_resume: str, accepted_suggestions: list[dict]) -> Generator[str, None, None]:
+def stream_resume_generation(
+    original_resume: str,
+    accepted_suggestions: list[dict],
+    profile: dict | None = None,
+) -> Generator[str, None, None]:
     improvements = "\n\n".join(
         f"{'MODIFY' if s['type'] == 'MODIFY' else 'ADD'} in {s.get('section', 'resume')}:\n"
         + (f"Original: {s['original_text']}\n" if s.get('original_text') else "")
@@ -111,9 +115,23 @@ def stream_resume_generation(original_resume: str, accepted_suggestions: list[di
         for s in accepted_suggestions
     )
 
+    contact_note = ""
+    if profile:
+        parts = [v for v in [
+            profile.get("name"), profile.get("email"), profile.get("phone"),
+            profile.get("location"), profile.get("linkedin"),
+        ] if v]
+        if parts:
+            contact_note = (
+                f"\n\nIMPORTANT: The resume header must include exactly this contact line "
+                f"(all on one line, separated by  |  ):\n"
+                f"{' | '.join(parts)}"
+            )
+
     prompt = (
         f"Original Resume:\n{original_resume}\n\n"
-        f"Improvements to apply:\n{improvements}\n\n"
+        f"Improvements to apply:\n{improvements}"
+        f"{contact_note}\n\n"
         "Write the complete updated resume."
     )
 

@@ -3,7 +3,7 @@ import uuid
 import streamlit as st
 
 from database.db import get_db
-from database.models import ProjectsDocument, Resume, SampleResume
+from database.models import ProjectsDocument, Resume, SampleResume, UserProfile
 from services.pdf_parser import extract_text_from_docx, extract_text_from_pdf
 
 ACCEPTED_TYPES = ["pdf", "docx"]
@@ -55,10 +55,48 @@ def _reset_uploader(name: str):
     st.session_state[f"_uploader_gen_{name}"] += 1
 
 
+def _load_profile() -> dict:
+    with get_db() as db:
+        p = db.query(UserProfile).filter_by(id="default").first()
+        if not p:
+            return {"name": "", "email": "", "phone": "", "linkedin": "", "location": ""}
+        return {"name": p.name or "", "email": p.email or "", "phone": p.phone or "",
+                "linkedin": p.linkedin or "", "location": p.location or ""}
+
+
+def _save_profile(name, email, phone, linkedin, location):
+    with get_db() as db:
+        p = db.query(UserProfile).filter_by(id="default").first()
+        if not p:
+            p = UserProfile(id="default")
+            db.add(p)
+        p.name = name
+        p.email = email
+        p.phone = phone
+        p.linkedin = linkedin
+        p.location = location
+
+
 def render():
     st.header("Document Library")
     st.caption("Upload the documents you want the AI to work with.")
 
+    # ── Profile ───────────────────────────────────────────────────────────────
+    with st.expander("👤 Contact Profile", expanded=True):
+        profile = _load_profile()
+        c1, c2 = st.columns(2)
+        name     = c1.text_input("Full name",     value=profile["name"],     key="prof_name")
+        email    = c2.text_input("Email",          value=profile["email"],    key="prof_email")
+        phone    = c1.text_input("Phone",          value=profile["phone"],    key="prof_phone")
+        location = c2.text_input("Location",       value=profile["location"], key="prof_location",
+                                 placeholder="City, State")
+        linkedin = st.text_input("LinkedIn URL",   value=profile["linkedin"], key="prof_linkedin",
+                                 placeholder="linkedin.com/in/yourname")
+        if st.button("Save profile", key="save_profile"):
+            _save_profile(name, email, phone, linkedin, location)
+            st.success("Profile saved.")
+
+    st.divider()
     col1, col2, col3 = st.columns(3)
 
     # ── Resumes ──────────────────────────────────────────────────────────────

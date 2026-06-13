@@ -6,6 +6,15 @@ from database.db import get_db
 from database.models import ProjectsDocument, Resume, SampleResume
 from services.pdf_parser import extract_text_from_docx, extract_text_from_pdf
 
+ACCEPTED_TYPES = ["pdf", "docx"]
+
+
+def _extract_text(uploaded_file) -> str:
+    file_bytes = uploaded_file.read()
+    if uploaded_file.name.lower().endswith(".docx"):
+        return extract_text_from_docx(file_bytes)
+    return extract_text_from_pdf(file_bytes)
+
 
 def _delete(model_class, item_id: str) -> str | None:
     try:
@@ -55,26 +64,26 @@ def render():
     # ── Resumes ──────────────────────────────────────────────────────────────
     with col1:
         st.subheader("Your Resumes")
-        st.caption("PDFs to be optimized. First = primary.")
+        st.caption("PDF or DOCX to be optimized. First = primary.")
 
         uploaded = st.file_uploader(
-            "Add resume PDF", type=["pdf"],
+            "Add resume", type=ACCEPTED_TYPES,
             key=_uploader_key("resume"),
             label_visibility="collapsed",
         )
         if uploaded:
-            pdf_bytes = uploaded.read()
-            text = extract_text_from_pdf(pdf_bytes)
+            text = _extract_text(uploaded)
             if not text:
-                st.error("No text extracted — ensure the PDF is not a scanned image.")
+                st.error("No text extracted — ensure the file is not a scanned image.")
             else:
+                file_bytes = uploaded.getvalue()
                 with get_db() as db:
                     count = db.query(Resume).count()
                     db.add(Resume(
                         id=str(uuid.uuid4()),
                         filename=uploaded.name,
                         content=text,
-                        pdf_data=pdf_bytes,
+                        pdf_data=file_bytes,
                         order=count,
                     ))
                 _reset_uploader("resume")
@@ -90,8 +99,7 @@ def render():
                 label = fname if len(fname) <= 28 else fname[:25] + "..."
                 c1.text(f"{'★ ' if i == 0 else ''}{label}")
                 if c2.button("↑", key=f"up_{rid}", disabled=i == 0):
-                    prev_id = resume_rows[i - 1][0]
-                    _swap_order(rid, prev_id)
+                    _swap_order(rid, resume_rows[i - 1][0])
                     st.rerun()
                 if c3.button("🗑", key=f"dr_{rid}"):
                     err = _delete(Resume, rid)
@@ -112,22 +120,22 @@ def render():
     # ── Sample Resumes ────────────────────────────────────────────────────────
     with col2:
         st.subheader("Sample Resumes")
-        st.caption("Reference style for generation (optional).")
+        st.caption("PDF or DOCX reference style for generation (optional).")
 
         uploaded_s = st.file_uploader(
-            "Add sample PDF", type=["pdf"],
+            "Add sample", type=ACCEPTED_TYPES,
             key=_uploader_key("sample"),
             label_visibility="collapsed",
         )
         if uploaded_s:
-            pdf_bytes = uploaded_s.read()
-            text = extract_text_from_pdf(pdf_bytes)
+            text = _extract_text(uploaded_s)
+            file_bytes = uploaded_s.getvalue()
             with get_db() as db:
                 db.add(SampleResume(
                     id=str(uuid.uuid4()),
                     filename=uploaded_s.name,
                     content=text,
-                    pdf_data=pdf_bytes,
+                    pdf_data=file_bytes,
                 ))
             _reset_uploader("sample")
             st.rerun()
@@ -158,19 +166,15 @@ def render():
     # ── Projects / Context ────────────────────────────────────────────────────
     with col3:
         st.subheader("Projects / Context")
-        st.caption("Portfolios or extra context for the AI (optional).")
+        st.caption("PDF or DOCX portfolios or extra context for the AI (optional).")
 
         uploaded_p = st.file_uploader(
-            "Add context PDF or DOCX", type=["pdf", "docx"],
+            "Add context doc", type=ACCEPTED_TYPES,
             key=_uploader_key("proj"),
             label_visibility="collapsed",
         )
         if uploaded_p:
-            file_bytes = uploaded_p.read()
-            if uploaded_p.name.endswith(".docx"):
-                text = extract_text_from_docx(file_bytes)
-            else:
-                text = extract_text_from_pdf(file_bytes)
+            text = _extract_text(uploaded_p)
             with get_db() as db:
                 db.add(ProjectsDocument(
                     id=str(uuid.uuid4()),

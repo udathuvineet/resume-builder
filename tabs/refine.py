@@ -1,11 +1,13 @@
+import json
 import uuid
 
+import plotly.graph_objects as go
 import streamlit as st
 
 from database.db import get_db
-from database.models import (AnalysisSession, GPT4Suggestion, RefineVerdict,
-                              RefinedSuggestion, Requirement, Resume,
-                              Suggestion, SuggestionType)
+from database.models import (AnalysisSession, GPT4MatchResult, GPT4Suggestion,
+                              RefineVerdict, RefinedSuggestion, Requirement,
+                              Resume, Suggestion, SuggestionType)
 from services import ai_service
 
 _SUGGESTION_THRESHOLD = 0.8
@@ -13,8 +15,12 @@ _SUGGESTION_THRESHOLD = 0.8
 _VERDICT_CONFIG = {
     "approved": ("✅", "Approved", "#28a745"),
     "improved": ("✏️", "Improved", "#0d6efd"),
-    "flagged":  ("⚠️", "Flagged",  "#dc3545"),
+    "flagged":  ("⚠️",  "Flagged",  "#dc3545"),
 }
+
+
+def _score_color(s: float) -> str:
+    return "#28a745" if s >= 0.75 else ("#e6a817" if s >= 0.5 else "#dc3545")
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -43,23 +49,13 @@ def _apply_refinement(refined_id: str, improved_text: str, sugg_id: str):
             s.edited_text = improved_text
 
 
-def _delete_gpt4_suggestions(session_id: str):
-    with get_db() as db:
-        db.query(GPT4Suggestion).filter_by(session_id=session_id).delete()
-
-
-def _delete_refinements(session_id: str):
-    with get_db() as db:
-        db.query(RefinedSuggestion).filter_by(session_id=session_id).delete()
-
-
 # ── Main render ───────────────────────────────────────────────────────────────
 
 def render():
     st.header("Refine")
     st.caption(
-        "GPT-4o contributes its own independent suggestions for each gap, "
-        "and separately reviews Claude's suggestions to approve, improve, or flag them."
+        "Three sequential steps: GPT-4o first scores the resume independently, "
+        "then reviews Claude's suggestions, then adds its own unique improvements."
     )
 
     # ── Session selector ──────────────────────────────────────────────────────
@@ -82,7 +78,7 @@ def render():
     selected_id = options[selected_label]
     st.session_state["current_session_id"] = selected_id
 
-    # ── Load session data ─────────────────────────────────────────────────────
+    # ── Load all data up-front ────────────────────────────────────────────────
     with get_db() as db:
         session_row = db.query(AnalysisSession).filter_by(id=selected_id).first()
         jd_text = session_row.job_description if session_row else ""
@@ -97,15 +93,15 @@ def render():
             .order_by(Requirement.match_score)
             .all()
         )
+        req_map = {r.id: r.text for r in all_reqs}
         gap_reqs = [
             {"id": r.id, "text": r.text, "match_score": r.match_score,
              "match_detail": r.match_detail, "category": r.category}
             for r in all_reqs if r.match_score < _SUGGESTION_THRESHOLD
         ]
-        req_map = {r.id: r.text for r in all_reqs}
 
-        # Claude's accepted suggestions (for the review section)
-        accepted_claude = (
+        # Claude's accepted suggestions
+        claude_suggs = (
             db.query(Suggestion)
             .filter_by(session_id=selected_id, is_selected=True)
             .all()
@@ -119,19 +115,28 @@ def render():
             "section": s.section,
             "requirement_text": req_map.get(s.requirement_id, ""),
             "requirement_id": s.requirement_id,
-        } for s in accepted_claude]
+        } for s in claude_suggs]
 
-        # Existing GPT-4o suggestions
-        existing_gpt4 = (
-            db.query(GPT4Suggestion)
-            .filter_by(session_id=selected_id)
-            .all()
-        )
+        # Step 1 result
+        match_result = db.query(GPT4MatchResult).filter_by(session_id=selected_id).first()
+
+        # Step 2 result
+        refined_rows = db.query(RefinedSuggestion).filter_by(session_id=selected_id).all()
+        refined_map: dict[str, dict] = {
+            r.suggestion_id: {
+                "id": r.id, "verdict": r.verdict.value,
+                "improved_text": r.improved_text,
+                "critique": r.critique, "is_applied": r.is_applied,
+            }
+            for r in refined_rows
+        }
+
+        # Step 3 result
+        gpt4_suggs = db.query(GPT4Suggestion).filter_by(session_id=selected_id).all()
         gpt4_by_req: dict[str, list[dict]] = {}
-        for s in existing_gpt4:
+        for s in gpt4_suggs:
             gpt4_by_req.setdefault(s.requirement_id, []).append({
-                "id": s.id,
-                "type": s.type.value,
+                "id": s.id, "type": s.type.value,
                 "original_text": s.original_text,
                 "suggested_text": s.suggested_text,
                 "edited_text": s.edited_text,
@@ -139,187 +144,141 @@ def render():
                 "section": s.section,
             })
 
-        # Existing refinements of Claude's suggestions
-        existing_refinements = (
-            db.query(RefinedSuggestion)
-            .filter_by(session_id=selected_id)
-            .all()
+    step1_done = match_result is not None
+    step2_done = bool(refined_map)
+    step3_done = bool(gpt4_by_req)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STEP 1 — GPT-4o Match Assessment
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("### Step 1 — GPT-4o Match Assessment")
+    st.caption("GPT-4o independently scores how well your resume matches the job description.")
+
+    col_s1, col_s1info = st.columns([2, 5])
+    with col_s1:
+        run_step1 = st.button(
+            "Re-run Step 1" if step1_done else "Run Step 1",
+            key="btn_step1", type="primary",
         )
-        refined_map: dict[str, dict] = {
-            r.suggestion_id: {
-                "id": r.id,
-                "verdict": r.verdict.value,
-                "improved_text": r.improved_text,
-                "critique": r.critique,
-                "is_applied": r.is_applied,
-            }
-            for r in existing_refinements
-        }
+    with col_s1info:
+        if step1_done:
+            st.caption(f"GPT-4o score: **{match_result.overall_score:.0%}** — click to re-run")
 
-    if not gap_reqs and not claude_sugg_data:
-        st.warning("No gap requirements or accepted suggestions found for this session.")
-        return
+    if run_step1:
+        if not resume_text or not jd_text:
+            st.error("Missing resume or job description.")
+            st.stop()
+        with st.status("GPT-4o scoring the resume...", expanded=True) as status:
+            try:
+                result = ai_service.analyze_resume_gpt4(all_reqs, resume_text, jd_text)
+                scores_by_req = {r["req_id"]: r for r in result.get("requirements", [])}
+                with get_db() as db:
+                    existing = db.query(GPT4MatchResult).filter_by(session_id=selected_id).first()
+                    if existing:
+                        db.delete(existing)
+                    db.add(GPT4MatchResult(
+                        id=str(uuid.uuid4()),
+                        session_id=selected_id,
+                        overall_score=float(result.get("overall_score", 0.0)),
+                        summary=result.get("summary", ""),
+                        requirements_json=json.dumps(scores_by_req),
+                    ))
+                status.update(label="Step 1 complete!", state="complete")
+                step1_done = True
+            except EnvironmentError as e:
+                status.update(label="Error", state="error")
+                st.error(str(e))
+                st.info("Add `OPENAI_API_KEY` to your environment variables.")
+                st.stop()
+            except Exception as e:
+                status.update(label="Error", state="error")
+                st.error(f"GPT-4o call failed: {e}")
+                st.stop()
+        st.rerun()
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION 1 — GPT-4o's Own Suggestions
-    # ══════════════════════════════════════════════════════════════════════════
-    st.subheader("GPT-4o Suggestions")
-    st.caption(
-        "GPT-4o reads the same gaps Claude found and writes its own suggestions "
-        "independently. Accept and edit them just like Claude's."
-    )
+    if step1_done and match_result:
+        scores_by_req = json.loads(match_result.requirements_json)
 
-    has_gpt4 = bool(gpt4_by_req)
-    col_btn1, col_info1 = st.columns([2, 5])
-    with col_btn1:
-        run_gpt4 = st.button(
-            "Re-generate GPT-4o Suggestions" if has_gpt4 else "Generate GPT-4o Suggestions",
-            type="primary",
-            key="btn_gpt4_sugg",
-        )
-    with col_info1:
-        if has_gpt4:
-            total = sum(len(v) for v in gpt4_by_req.values())
-            selected = sum(
-                1 for suggs in gpt4_by_req.values()
-                for s in suggs if s["is_selected"]
-            )
-            st.caption(f"{total} suggestions generated, {selected} accepted")
+        col_gauge, col_detail = st.columns([1, 2])
+        with col_gauge:
+            score = match_result.overall_score
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=score * 100,
+                number={"suffix": "%"},
+                title={"text": "GPT-4o Score"},
+                gauge={
+                    "axis": {"range": [0, 100]},
+                    "bar": {"color": _score_color(score)},
+                    "steps": [
+                        {"range": [0, 50],  "color": "#fff0f0"},
+                        {"range": [50, 75], "color": "#fffbee"},
+                        {"range": [75, 100],"color": "#f0fff4"},
+                    ],
+                },
+            ))
+            fig.update_layout(height=200, margin=dict(t=40, b=0, l=20, r=20))
+            st.plotly_chart(fig, use_container_width=True)
 
-    if run_gpt4:
-        if not gap_reqs:
-            st.info("No gaps to generate suggestions for.")
-        elif not resume_text:
-            st.error("No resume found.")
-        else:
-            _delete_gpt4_suggestions(selected_id)
-            gpt4_by_req = {}
-            with st.status("GPT-4o is generating suggestions...", expanded=True) as status:
-                try:
-                    result = ai_service.generate_suggestions_gpt4(gap_reqs, resume_texts)
-                    by_req = result.get("suggestions_by_requirement", {})
-                    valid_req_ids = {r["id"] for r in gap_reqs}
-                    with get_db() as db:
-                        for req_id, suggs in by_req.items():
-                            if req_id not in valid_req_ids:
-                                continue
-                            for s in suggs:
-                                sid = str(uuid.uuid4())
-                                stype = s.get("type", "MODIFY").upper()
-                                db.add(GPT4Suggestion(
-                                    id=sid,
-                                    session_id=selected_id,
-                                    requirement_id=req_id,
-                                    original_text=s.get("original_text"),
-                                    suggested_text=s.get("suggested_text", ""),
-                                    type=SuggestionType(stype if stype in ("MODIFY", "ADD") else "MODIFY"),
-                                    section=s.get("section"),
-                                ))
-                    status.update(label="GPT-4o suggestions ready!", state="complete")
-                except EnvironmentError as e:
-                    status.update(label="Error", state="error")
-                    st.error(str(e))
-                    st.info("Add `OPENAI_API_KEY` to your environment variables.")
-                    st.stop()
-                except Exception as e:
-                    status.update(label="Error", state="error")
-                    st.error(f"GPT-4o call failed: {e}")
-                    st.stop()
-            st.rerun()
+        with col_detail:
+            st.markdown(f"*{match_result.summary}*")
+            st.markdown("**Per-requirement scores**")
+            for req in sorted(all_reqs, key=lambda r: scores_by_req.get(r.id, {}).get("score", 1.0)):
+                r_data = scores_by_req.get(req.id, {})
+                r_score = r_data.get("score", None)
+                if r_score is None:
+                    continue
+                icon = "🟢" if r_score >= 0.75 else ("🟡" if r_score >= 0.5 else "🔴")
+                with st.expander(f"{icon} {req.text[:80]} — {r_score:.0%}", expanded=False):
+                    st.caption(r_data.get("detail", ""))
 
-    if gpt4_by_req:
-        for req in gap_reqs:
-            req_suggs = gpt4_by_req.get(req["id"])
-            if not req_suggs:
-                continue
-            score = req["match_score"]
-            icon = "🔴" if score < 0.5 else "🟡"
-            title = f"{icon} {req['text'][:90]}{'...' if len(req['text']) > 90 else ''} — {score:.0%}"
-            with st.expander(title, expanded=(score < 0.5)):
-                st.markdown(f"**{req['text']}**")
-                st.caption(f"Category: `{req['category']}`  •  Score: {score:.0%}")
-                st.markdown("---")
-                for sugg in req_suggs:
-                    sel_key  = f"g4sel_{sugg['id']}"
-                    edit_key = f"g4edit_{sugg['id']}"
-                    action   = "Modify" if sugg["type"] == "MODIFY" else "Add"
-
-                    col_check, col_label = st.columns([1, 10])
-                    is_checked = col_check.checkbox(
-                        "", value=sugg["is_selected"], key=sel_key,
-                        on_change=_toggle_gpt4_sugg, args=(sugg["id"], sel_key),
-                        label_visibility="collapsed",
-                    )
-                    col_label.markdown(
-                        f"**{action}** `{sugg.get('section') or 'resume'}`  \n"
-                        f"{sugg['suggested_text']}"
-                    )
-                    if is_checked or st.session_state.get(sel_key, sugg["is_selected"]):
-                        if sugg.get("original_text"):
-                            st.caption(f"Replaces: *{sugg['original_text']}*")
-                        st.text_area(
-                            "Edit",
-                            value=sugg.get("edited_text") or sugg["suggested_text"],
-                            height=90,
-                            key=edit_key,
-                            label_visibility="collapsed",
-                            on_change=_save_gpt4_edit,
-                            args=(sugg["id"], edit_key),
-                        )
-                    st.markdown("")
-    elif not run_gpt4:
-        st.info("Click the button above to have GPT-4o generate its own suggestions.")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION 2 — GPT-4o Review of Claude's Suggestions
-    # ══════════════════════════════════════════════════════════════════════════
     st.divider()
-    st.subheader("GPT-4o Review of Claude's Suggestions")
-    st.caption(
-        "GPT-4o critiques every suggestion Claude made and either approves it, "
-        "rewrites it, or flags it as unhelpful."
-    )
 
-    if not claude_sugg_data:
+    # ══════════════════════════════════════════════════════════════════════════
+    # STEP 2 — Review Claude's Suggestions
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("### Step 2 — GPT-4o Reviews Claude's Suggestions")
+    st.caption("GPT-4o approves, improves, or flags each suggestion Claude made.")
+
+    if not step1_done:
+        st.info("Complete Step 1 first.")
+    elif not claude_sugg_data:
         st.info("No accepted Claude suggestions to review. Accept some in the **Review** tab first.")
     else:
-        has_reviews = bool(refined_map)
-        col_btn2, col_info2 = st.columns([2, 5])
-        with col_btn2:
-            run_review = st.button(
-                "Re-run GPT-4o Review" if has_reviews else "Run GPT-4o Review",
-                key="btn_gpt4_review",
+        col_s2, col_s2info = st.columns([2, 5])
+        with col_s2:
+            run_step2 = st.button(
+                "Re-run Step 2" if step2_done else "Run Step 2",
+                key="btn_step2", type="primary",
             )
-        with col_info2:
-            if has_reviews:
+        with col_s2info:
+            if step2_done:
+                n_ok   = sum(1 for r in refined_map.values() if r["verdict"] == "approved")
                 n_imp  = sum(1 for r in refined_map.values() if r["verdict"] == "improved")
                 n_flag = sum(1 for r in refined_map.values() if r["verdict"] == "flagged")
-                n_ok   = sum(1 for r in refined_map.values() if r["verdict"] == "approved")
                 st.caption(f"✅ {n_ok} approved  ✏️ {n_imp} improved  ⚠️ {n_flag} flagged")
 
-        if run_review:
-            _delete_refinements(selected_id)
+        if run_step2:
+            with get_db() as db:
+                db.query(RefinedSuggestion).filter_by(session_id=selected_id).delete()
             refined_map = {}
             with st.status("GPT-4o reviewing Claude's suggestions...", expanded=True) as status:
                 try:
                     result = ai_service.refine_suggestions_with_gpt4(
                         resume_text, jd_text, claude_sugg_data
                     )
-                    refinements = result.get("refinements", [])
                     valid_ids = {s["id"] for s in claude_sugg_data}
                     valid_verdicts = {v.value for v in RefineVerdict}
                     with get_db() as db:
-                        for ref in refinements:
+                        for ref in result.get("refinements", []):
                             sid = ref.get("suggestion_id", "")
                             v = ref.get("verdict", "").lower()
                             if sid not in valid_ids or v not in valid_verdicts:
                                 continue
                             rid = str(uuid.uuid4())
                             db.add(RefinedSuggestion(
-                                id=rid,
-                                session_id=selected_id,
-                                suggestion_id=sid,
-                                verdict=RefineVerdict(v),
+                                id=rid, session_id=selected_id,
+                                suggestion_id=sid, verdict=RefineVerdict(v),
                                 improved_text=ref.get("improved_text"),
                                 critique=ref.get("critique", ""),
                             ))
@@ -329,18 +288,15 @@ def render():
                                 "critique": ref.get("critique", ""),
                                 "is_applied": False,
                             }
-                    status.update(label="Review complete!", state="complete")
-                except EnvironmentError as e:
-                    status.update(label="Error", state="error")
-                    st.error(str(e))
-                    st.stop()
+                    status.update(label="Step 2 complete!", state="complete")
+                    step2_done = True
                 except Exception as e:
                     status.update(label="Error", state="error")
                     st.error(f"GPT-4o call failed: {e}")
                     st.stop()
             st.rerun()
 
-        if refined_map:
+        if step2_done and refined_map:
             for verdict_key in ("flagged", "improved", "approved"):
                 icon, label, color = _VERDICT_CONFIG[verdict_key]
                 items = [
@@ -352,9 +308,9 @@ def render():
                     continue
                 st.markdown(f"**{icon} {label} ({len(items)})**")
                 for sugg, ref in items:
-                    section = sugg.get("section") or "General"
-                    preview = sugg["requirement_text"][:70] + "..." if len(sugg["requirement_text"]) > 70 else sugg["requirement_text"]
-                    with st.expander(f"`{section}` — {preview}", expanded=(verdict_key != "approved")):
+                    sec = sugg.get("section") or "General"
+                    preview = sugg["requirement_text"][:70] + ("..." if len(sugg["requirement_text"]) > 70 else "")
+                    with st.expander(f"`{sec}` — {preview}", expanded=(verdict_key != "approved")):
                         st.markdown(
                             f"<span style='color:{color};font-weight:bold'>{icon} {label}</span>",
                             unsafe_allow_html=True,
@@ -363,11 +319,11 @@ def render():
                         if verdict_key == "approved":
                             st.info(sugg.get("edited_text") or sugg["suggested_text"])
                         elif verdict_key == "improved":
-                            col_a, col_b = st.columns(2)
-                            col_a.markdown("**Claude's version**")
-                            col_a.info(sugg.get("edited_text") or sugg["suggested_text"])
-                            col_b.markdown("**GPT-4o's version**")
-                            col_b.success(ref["improved_text"] or "")
+                            ca, cb = st.columns(2)
+                            ca.markdown("**Claude's version**")
+                            ca.info(sugg.get("edited_text") or sugg["suggested_text"])
+                            cb.markdown("**GPT-4o's version**")
+                            cb.success(ref["improved_text"] or "")
                             if not ref["is_applied"]:
                                 if st.button("Apply GPT-4o version", key=f"apply_{ref['id']}", type="primary"):
                                     _apply_refinement(ref["id"], ref["improved_text"], sugg["id"])
@@ -378,5 +334,114 @@ def render():
                             st.warning(sugg.get("edited_text") or sugg["suggested_text"])
                             st.caption("Consider unchecking this in the **Review** tab or rewriting it manually.")
                 st.markdown("")
-        elif not run_review:
-            st.info("Click the button above to have GPT-4o review Claude's suggestions.")
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STEP 3 — GPT-4o's Own Unique Suggestions
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("### Step 3 — GPT-4o's Own Suggestions")
+    st.caption("GPT-4o adds suggestions it thinks Claude missed. Duplicates are filtered out.")
+
+    if not step2_done:
+        st.info("Complete Step 2 first.")
+    elif not gap_reqs:
+        st.info("No gap requirements found for this session.")
+    else:
+        col_s3, col_s3info = st.columns([2, 5])
+        with col_s3:
+            run_step3 = st.button(
+                "Re-run Step 3" if step3_done else "Run Step 3",
+                key="btn_step3", type="primary",
+            )
+        with col_s3info:
+            if step3_done:
+                total = sum(len(v) for v in gpt4_by_req.values())
+                selected_count = sum(
+                    1 for suggs in gpt4_by_req.values() for s in suggs if s["is_selected"]
+                )
+                st.caption(f"{total} unique suggestions, {selected_count} accepted")
+
+        if run_step3:
+            with get_db() as db:
+                db.query(GPT4Suggestion).filter_by(session_id=selected_id).delete()
+            gpt4_by_req = {}
+            with st.status("GPT-4o generating unique suggestions...", expanded=True) as status:
+                try:
+                    result = ai_service.generate_suggestions_gpt4(
+                        gap_reqs, resume_texts, existing_suggestions=claude_sugg_data
+                    )
+                    valid_req_ids = {r["id"] for r in gap_reqs}
+                    with get_db() as db:
+                        for req_id, suggs in result.get("suggestions_by_requirement", {}).items():
+                            if req_id not in valid_req_ids:
+                                continue
+                            for s in suggs:
+                                stype = s.get("type", "MODIFY").upper()
+                                sid = str(uuid.uuid4())
+                                db.add(GPT4Suggestion(
+                                    id=sid, session_id=selected_id,
+                                    requirement_id=req_id,
+                                    original_text=s.get("original_text"),
+                                    suggested_text=s.get("suggested_text", ""),
+                                    type=SuggestionType(stype if stype in ("MODIFY", "ADD") else "MODIFY"),
+                                    section=s.get("section"),
+                                ))
+                                gpt4_by_req.setdefault(req_id, []).append({
+                                    "id": sid, "type": stype,
+                                    "original_text": s.get("original_text"),
+                                    "suggested_text": s.get("suggested_text", ""),
+                                    "edited_text": None, "is_selected": False,
+                                    "section": s.get("section"),
+                                })
+                    status.update(label="Step 3 complete!", state="complete")
+                    step3_done = True
+                except Exception as e:
+                    status.update(label="Error", state="error")
+                    st.error(f"GPT-4o call failed: {e}")
+                    st.stop()
+            st.rerun()
+
+        if step3_done and gpt4_by_req:
+            st.caption("Accept the ones you want included in the generated resume.")
+            for req in gap_reqs:
+                suggs = gpt4_by_req.get(req["id"])
+                if not suggs:
+                    continue
+                score = req["match_score"]
+                icon = "🔴" if score < 0.5 else "🟡"
+                with st.expander(
+                    f"{icon} {req['text'][:90]}{'...' if len(req['text']) > 90 else ''} — {score:.0%}",
+                    expanded=(score < 0.5),
+                ):
+                    st.markdown(f"**{req['text']}**")
+                    st.caption(f"Category: `{req['category']}`  •  Score: {score:.0%}")
+                    st.markdown("---")
+                    for sugg in suggs:
+                        sel_key  = f"g4sel_{sugg['id']}"
+                        edit_key = f"g4edit_{sugg['id']}"
+                        action = "Modify" if sugg["type"] == "MODIFY" else "Add"
+                        col_check, col_label = st.columns([1, 10])
+                        is_checked = col_check.checkbox(
+                            "", value=sugg["is_selected"], key=sel_key,
+                            on_change=_toggle_gpt4_sugg, args=(sugg["id"], sel_key),
+                            label_visibility="collapsed",
+                        )
+                        col_label.markdown(
+                            f"**{action}** `{sugg.get('section') or 'resume'}`  \n"
+                            f"{sugg['suggested_text']}"
+                        )
+                        if is_checked or st.session_state.get(sel_key, sugg["is_selected"]):
+                            if sugg.get("original_text"):
+                                st.caption(f"Replaces: *{sugg['original_text']}*")
+                            st.text_area(
+                                "Edit",
+                                value=sugg.get("edited_text") or sugg["suggested_text"],
+                                height=90, key=edit_key,
+                                label_visibility="collapsed",
+                                on_change=_save_gpt4_edit,
+                                args=(sugg["id"], edit_key),
+                            )
+                        st.markdown("")
+        elif step3_done:
+            st.success("GPT-4o had nothing new to add — Claude's suggestions already cover the gaps well.")

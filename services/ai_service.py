@@ -84,6 +84,8 @@ Return ONLY valid JSON (no markdown fences):
 
 _GPT4_SUGGESTIONS_SYSTEM = """You are an expert resume writer and ATS optimizer. Generate specific, actionable suggestions to improve how a resume matches a job description.
 
+You will be shown suggestions already made by another AI. Do NOT repeat or rephrase those — only add suggestions that address something genuinely new or different.
+
 Write in clear, natural business English. Do not use:
 - Em dashes (—) or en dashes (–) as prose punctuation
 - Cliches like "spearheaded", "leveraged", "synergized", "passionate", "dynamic", "results-driven"
@@ -109,6 +111,7 @@ Return ONLY a valid JSON object (no markdown fences):
   }
 }
 
+If a requirement is already well-covered by the existing suggestions, omit it entirely.
 Use the exact requirement IDs provided. Be specific and ATS-optimized."""
 
 _GENERATION_SYSTEM = """You are an expert resume writer. Rewrite the provided resume incorporating all suggested improvements.
@@ -195,13 +198,62 @@ def audit_resume_content(resume_text: str, jd_text: str) -> dict:
     return _parse_json(response.content[0].text)
 
 
-def generate_suggestions_gpt4(requirements: list[dict], resume_texts: list[str]) -> dict:
+_GPT4_ANALYSIS_SYSTEM = """You are an expert resume analyst and ATS specialist. Independently analyze the provided resume against the job description.
+
+Return ONLY a valid JSON object (no markdown fences):
+{
+  "requirements": [
+    {
+      "req_id": "<id from the provided list>",
+      "score": 0.85,
+      "detail": "specific explanation of how well the resume matches this requirement"
+    }
+  ],
+  "overall_score": 0.75,
+  "summary": "2-3 sentence honest assessment of the resume's fit for this role"
+}
+
+Score 0.0 (no match) to 1.0 (perfect match). Use the exact req_id values provided."""
+
+
+def analyze_resume_gpt4(requirements: list[dict], resume_text: str, jd_text: str) -> dict:
+    oai = _get_openai()
+    reqs_block = "\n".join(
+        f"req_id: {r['id']}  |  {r['text']}" for r in requirements
+    )
+    response = oai.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=4096,
+        messages=[
+            {"role": "system", "content": _GPT4_ANALYSIS_SYSTEM},
+            {"role": "user", "content": (
+                f"Job Description:\n{jd_text}\n\n"
+                f"Resume:\n{resume_text}\n\n"
+                f"Requirements to score (use these exact req_id values):\n{reqs_block}\n\n"
+                "Score each requirement and return JSON."
+            )},
+        ],
+    )
+    return _parse_json(response.choices[0].message.content)
+
+
+def generate_suggestions_gpt4(
+    requirements: list[dict],
+    resume_texts: list[str],
+    existing_suggestions: list[dict] | None = None,
+) -> dict:
     oai = _get_openai()
     resume_block = "\n\n---\n\n".join(resume_texts)
     reqs_block = "\n\n".join(
         f"ID: {r['id']}\nRequirement: {r['text']}\nScore: {r['match_score']:.0%}\nGap: {r['match_detail']}"
         for r in requirements
     )
+    existing_block = ""
+    if existing_suggestions:
+        existing_block = "\n\nSuggestions already made by Claude (do NOT repeat these):\n" + "\n".join(
+            f"- [{s.get('section','?')}] {s.get('edited_text') or s.get('suggested_text','')}"
+            for s in existing_suggestions
+        )
     response = oai.chat.completions.create(
         model="gpt-4o",
         max_tokens=4096,
@@ -209,8 +261,9 @@ def generate_suggestions_gpt4(requirements: list[dict], resume_texts: list[str])
             {"role": "system", "content": _GPT4_SUGGESTIONS_SYSTEM},
             {"role": "user", "content": (
                 f"Requirements needing improvement:\n{reqs_block}\n\n"
-                f"Resume:\n{resume_block}\n\n"
-                "Generate suggestions and return JSON."
+                f"Resume:\n{resume_block}"
+                f"{existing_block}\n\n"
+                "Generate only NEW, unique suggestions and return JSON."
             )},
         ],
     )

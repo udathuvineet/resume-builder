@@ -166,3 +166,15 @@ class GPT4Suggestion(Base):
 
     session = relationship("AnalysisSession")
     requirement = relationship("Requirement")
+
+
+class GPT4MatchResult(Base):
+    __tablename__ = "gpt4_match_results"
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("analysis_sessions.id", ondelete="CASCADE"), nullable=False, unique=True)
+    overall_score = Column(Float, nullable=False)
+    summary = Column(Text, nullable=False)
+    requirements_json = Column(Text, nullable=False)  # JSON list of {req_id, score, detail}
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("AnalysisSession")

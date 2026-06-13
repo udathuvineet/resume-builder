@@ -1,4 +1,5 @@
 import io
+import re
 from html import escape
 
 from docx import Document
@@ -10,6 +11,61 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import (CondPageBreak, KeepTogether, Paragraph,
                                  SimpleDocTemplate, Spacer)
+
+# Matches role lines: "Title | 01/2024 – Present" or "Title [01/2024 – 12/2025]"
+_ROLE_RE = re.compile(
+    r'(\|\s*\d{2}/\d{4})'           # | MM/YYYY
+    r'|(\[\s*\d{2}/\d{4})'          # [MM/YYYY
+    r'|(\b\d{4}\s*[–—-]\s*(\d{4}|Present|Current)\b)',  # YYYY – YYYY/Present
+    re.IGNORECASE,
+)
+
+
+def _is_role_line(s: str) -> bool:
+    if s.startswith("•") or s.startswith("-"):
+        return False
+    return bool(_ROLE_RE.search(s))
+
+
+def _label_lines(text: str) -> list[tuple[str, str]]:
+    """Return (original_line, label) pairs.
+
+    Labels: name | contact | section | company | role | bullet | empty | body
+    """
+    raw = text.split("\n")
+    labels = ["body"] * len(raw)
+
+    # Index non-empty lines in order
+    non_empty = [(i, raw[i].strip()) for i in range(len(raw)) if raw[i].strip()]
+
+    for rank, (i, s) in enumerate(non_empty):
+        if rank == 0:
+            labels[i] = "name"
+        elif rank == 1 and not (s.isupper() and len(s) > 2):
+            labels[i] = "contact"
+        elif s.isupper() and len(s) > 2:
+            labels[i] = "section"
+        elif _is_role_line(s):
+            labels[i] = "role"
+        elif s.startswith("•") or (s.startswith("-") and len(s) > 2):
+            labels[i] = "bullet"
+
+    # Mark empty lines
+    for i, line in enumerate(raw):
+        if not line.strip():
+            labels[i] = "empty"
+
+    # Second pass: body lines immediately before a role line → company
+    non_empty_labels = [(i, labels[i]) for i, _ in non_empty]
+    for rank, (i, lbl) in enumerate(non_empty_labels):
+        if lbl != "body":
+            continue
+        if rank + 1 < len(non_empty_labels):
+            _, next_lbl = non_empty_labels[rank + 1]
+            if next_lbl == "role":
+                labels[i] = "company"
+
+    return list(zip(raw, labels))
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -35,15 +91,13 @@ def generate_pdf(resume_text: str) -> bytes:
     return buf.getvalue()
 
 
-# ── DOCX: template-based (matches original style) ────────────────────────────
+# ── DOCX: template-based ──────────────────────────────────────────────────────
 
 def _docx_from_template(resume_text: str, template_bytes: bytes) -> bytes:
     template = Document(io.BytesIO(template_bytes))
     styles = _extract_docx_styles(template)
 
     doc = Document(io.BytesIO(template_bytes))
-
-    # Clear body content but keep section properties (page size, margins)
     body = doc.element.body
     sect_pr = body.find(qn("w:sectPr"))
     for child in list(body):
@@ -52,7 +106,6 @@ def _docx_from_template(resume_text: str, template_bytes: bytes) -> bytes:
 
     _populate_docx(doc, resume_text, styles)
 
-    # Re-attach sectPr at the end so page layout is preserved
     if sect_pr is not None and body.find(qn("w:sectPr")) is None:
         body.append(sect_pr)
 
@@ -62,153 +115,136 @@ def _docx_from_template(resume_text: str, template_bytes: bytes) -> bytes:
 
 
 def _extract_docx_styles(doc: Document) -> dict:
-    styles = {
-        "name":    {"font": "Calibri", "size": 16.0, "bold": True,  "align": WD_ALIGN_PARAGRAPH.CENTER},
-        "contact": {"font": "Calibri", "size": 10.0, "bold": False, "align": WD_ALIGN_PARAGRAPH.CENTER},
-        "section": {"font": "Calibri", "size": 11.0, "bold": True,  "align": WD_ALIGN_PARAGRAPH.LEFT},
-        "body":    {"font": "Calibri", "size": 10.5, "bold": False, "align": WD_ALIGN_PARAGRAPH.LEFT},
-        "bullet":  {"font": "Calibri", "size": 10.5, "bold": False, "align": WD_ALIGN_PARAGRAPH.LEFT,
-                    "indent": Inches(0.25)},
-        "margins": {
-            "top":    Inches(0.75), "bottom": Inches(0.75),
-            "left":   Inches(1.0),  "right":  Inches(1.0),
-        },
-    }
+    base_font = "Calibri"
+    base_size = 10.5
 
+    # Try to detect base font from body paragraphs
+    for para in doc.paragraphs:
+        s = para.text.strip()
+        if not s or s.isupper():
+            continue
+        for run in para.runs:
+            if run.font.name:
+                base_font = run.font.name
+            if run.font.size:
+                base_size = run.font.size.pt
+            break
+        break
+
+    margins = {"top": Inches(0.75), "bottom": Inches(0.75),
+               "left": Inches(1.0), "right": Inches(1.0)}
     if doc.sections:
         s = doc.sections[0]
-        styles["margins"] = {
-            "top": s.top_margin, "bottom": s.bottom_margin,
-            "left": s.left_margin, "right": s.right_margin,
-        }
+        margins = {"top": s.top_margin, "bottom": s.bottom_margin,
+                   "left": s.left_margin, "right": s.right_margin}
 
+    # Name size: scan first paragraph
+    name_size = 18.0
     non_empty = [p for p in doc.paragraphs if p.text.strip()]
-    found = {"name": False, "contact": False, "section": False, "body": False, "bullet": False}
+    if non_empty:
+        r = next((r for r in non_empty[0].runs if r.text.strip()), None)
+        if r and r.font.size:
+            name_size = r.font.size.pt
 
-    for i, para in enumerate(non_empty):
-        text = para.text.strip()
-        runs = [r for r in para.runs if r.text.strip()]
-        if not runs:
-            continue
-        r = runs[0]
-
-        font_name = r.font.name
-        if not font_name and r.style:
-            font_name = r.style.font.name
-
-        font_size = None
-        if r.font.size:
-            font_size = r.font.size.pt
-        elif r.style and r.style.font.size:
-            font_size = r.style.font.size.pt
-
-        info = {}
-        if font_name:
-            info["font"] = font_name
-        if font_size:
-            info["size"] = font_size
-        if r.font.bold is not None:
-            info["bold"] = r.font.bold
-        if para.alignment is not None:
-            info["align"] = para.alignment
-        if para.paragraph_format.left_indent:
-            info["indent"] = para.paragraph_format.left_indent
-
-        if i == 0 and not found["name"]:
-            styles["name"].update(info)
-            found["name"] = True
-        elif i == 1 and not found["contact"]:
-            # Second paragraph = contact line; use name font but smaller
-            contact_info = dict(info)
-            contact_info["bold"] = False
-            if "size" not in contact_info:
-                contact_info["size"] = max(8.0, styles["name"].get("size", 11.0) - 4)
-            styles["contact"].update(contact_info)
-            found["contact"] = True
-        elif text.isupper() and len(text) > 2 and not found["section"]:
-            styles["section"].update(info)
-            found["section"] = True
-        elif (text.startswith("•") or text.startswith("-")) and not found["bullet"]:
-            styles["bullet"].update(info)
-            found["bullet"] = True
-        elif not text.isupper() and not text.startswith("•") and i > 1 and not found["body"]:
-            styles["body"].update(info)
-            found["body"] = True
-
-        if all(found.values()):
-            break
-
-    return styles
+    return {
+        "font":     base_font,
+        "name_size":    name_size,
+        "contact_size": max(8.0, base_size - 1),
+        "section_size": base_size + 0.5,
+        "body_size":    base_size,
+        "margins":  margins,
+    }
 
 
 def _populate_docx(doc: Document, resume_text: str, styles: dict):
-    lines = resume_text.strip().split("\n")
-    line_index = 0  # counts non-empty lines
+    font      = styles["font"]
+    margins   = styles["margins"]
 
-    for line in lines:
-        stripped = line.strip()
+    for section in doc.sections:
+        section.top_margin    = margins["top"]
+        section.bottom_margin = margins["bottom"]
+        section.left_margin   = margins["left"]
+        section.right_margin  = margins["right"]
 
-        if not stripped:
+    for line, label in _label_lines(resume_text):
+        s = line.strip()
+
+        if label == "empty":
             p = doc.add_paragraph()
-            p.paragraph_format.space_before = Pt(0)
-            p.paragraph_format.space_after = Pt(2)
+            p.paragraph_format.space_after = Pt(1)
             continue
 
-        if line_index == 0:
-            _add_styled_para(doc, stripped, styles["name"])
-        elif line_index == 1:
-            _add_styled_para(doc, stripped, styles["contact"])
-        elif stripped.isupper() and len(stripped) > 2:
-            _add_styled_para(doc, stripped, styles["section"])
-        elif stripped.startswith("•") or stripped.startswith("-"):
-            _add_styled_para(doc, stripped.lstrip("•- "), styles["bullet"])
-        else:
-            _add_styled_para(doc, stripped, styles["body"])
+        p = doc.add_paragraph()
+        fmt = p.paragraph_format
+        fmt.space_before = Pt(0)
+        fmt.space_after  = Pt(2)
 
-        line_index += 1
+        if label == "name":
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            fmt.space_after = Pt(0)
+            run = p.add_run(s)
+            run.font.name = font
+            run.font.size = Pt(styles["name_size"])
+            run.font.bold = True
 
+        elif label == "contact":
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            fmt.space_after = Pt(6)
+            run = p.add_run(s)
+            run.font.name = font
+            run.font.size = Pt(styles["contact_size"])
 
-def _add_styled_para(doc: Document, text: str, style: dict):
-    p = doc.add_paragraph()
-    if style.get("align") is not None:
-        p.alignment = style["align"]
-    fmt = p.paragraph_format
-    fmt.space_before = Pt(style.get("space_before", 0))
-    fmt.space_after = Pt(style.get("space_after", 2))
-    if style.get("indent"):
-        fmt.left_indent = style["indent"]
+        elif label == "section":
+            fmt.space_before = Pt(10)
+            fmt.space_after  = Pt(4)
+            run = p.add_run(s)
+            run.font.name = font
+            run.font.size = Pt(styles["section_size"])
+            run.font.bold = True
 
-    run = p.add_run(text)
-    if style.get("font"):
-        run.font.name = style["font"]
-    if style.get("size"):
-        run.font.size = Pt(style["size"])
-    if style.get("bold") is not None:
-        run.font.bold = style["bold"]
-    try:
-        if style.get("color"):
-            run.font.color.rgb = style["color"]
-    except Exception:
-        pass
+        elif label == "company":
+            fmt.space_before = Pt(6)
+            fmt.space_after  = Pt(0)
+            run = p.add_run(s)
+            run.font.name = font
+            run.font.size = Pt(styles["body_size"])
+            run.font.bold = True
+            run.font.underline = True
 
+        elif label == "role":
+            fmt.space_after = Pt(2)
+            run = p.add_run(s)
+            run.font.name = font
+            run.font.size = Pt(styles["body_size"])
+            run.font.bold = True
 
-# ── DOCX: basic fallback ──────────────────────────────────────────────────────
+        elif label == "bullet":
+            fmt.left_indent  = Inches(0.25)
+            fmt.space_after  = Pt(1)
+            text = s.lstrip("•- ").strip()
+            run = p.add_run(f"• {text}")
+            run.font.name = font
+            run.font.size = Pt(styles["body_size"])
+
+        else:  # body
+            run = p.add_run(s)
+            run.font.name = font
+            run.font.size = Pt(styles["body_size"])
+
 
 def _docx_basic(resume_text: str) -> bytes:
     doc = Document()
-    for section in doc.sections:
-        section.top_margin = Inches(0.75)
-        section.bottom_margin = Inches(0.75)
-        section.left_margin = Inches(1.0)
-        section.right_margin = Inches(1.0)
+    for sec in doc.sections:
+        sec.top_margin    = Inches(0.75)
+        sec.bottom_margin = Inches(0.75)
+        sec.left_margin   = Inches(1.0)
+        sec.right_margin  = Inches(1.0)
 
     default_styles = {
-        "name":    {"font": "Calibri", "size": 16.0, "bold": True,  "align": WD_ALIGN_PARAGRAPH.CENTER},
-        "contact": {"font": "Calibri", "size": 10.0, "bold": False, "align": WD_ALIGN_PARAGRAPH.CENTER},
-        "section": {"font": "Calibri", "size": 11.0, "bold": True,  "align": WD_ALIGN_PARAGRAPH.LEFT},
-        "body":    {"font": "Calibri", "size": 10.5, "bold": False, "align": WD_ALIGN_PARAGRAPH.LEFT},
-        "bullet":  {"font": "Calibri", "size": 10.5, "bold": False, "align": WD_ALIGN_PARAGRAPH.LEFT,
-                    "indent": Inches(0.25)},
+        "font": "Calibri", "name_size": 18.0, "contact_size": 10.0,
+        "section_size": 11.0, "body_size": 10.5,
+        "margins": {"top": Inches(0.75), "bottom": Inches(0.75),
+                    "left": Inches(1.0), "right": Inches(1.0)},
     }
     _populate_docx(doc, resume_text, default_styles)
 
@@ -217,90 +253,86 @@ def _docx_basic(resume_text: str) -> bytes:
     return buf.getvalue()
 
 
-# ── PDF: section-aware with KeepTogether ─────────────────────────────────────
+# ── PDF ───────────────────────────────────────────────────────────────────────
 
 def _build_pdf_story(resume_text: str) -> list:
-    styles = getSampleStyleSheet()
+    base = getSampleStyleSheet()
 
     name_style = ParagraphStyle(
-        "RName", parent=styles["Normal"],
-        fontSize=16, fontName="Helvetica-Bold",
+        "RName", parent=base["Normal"],
+        fontSize=18, fontName="Helvetica-Bold",
         alignment=1, spaceAfter=2,
     )
     contact_style = ParagraphStyle(
-        "RContact", parent=styles["Normal"],
+        "RContact", parent=base["Normal"],
         fontSize=10, fontName="Helvetica",
-        alignment=1, spaceAfter=6,
+        alignment=1, spaceAfter=8,
     )
     section_style = ParagraphStyle(
-        "RSection", parent=styles["Normal"],
+        "RSection", parent=base["Normal"],
         fontSize=11, fontName="Helvetica-Bold",
-        spaceBefore=8, spaceAfter=3,
+        spaceBefore=10, spaceAfter=4,
+    )
+    company_style = ParagraphStyle(
+        "RCompany", parent=base["Normal"],
+        fontSize=10.5, fontName="Helvetica-Bold",
+        spaceBefore=6, spaceAfter=0,
+    )
+    role_style = ParagraphStyle(
+        "RRole", parent=base["Normal"],
+        fontSize=10, fontName="Helvetica-Bold",
+        spaceBefore=0, spaceAfter=2,
     )
     body_style = ParagraphStyle(
-        "RBody", parent=styles["Normal"],
-        fontSize=10, spaceAfter=2,
+        "RBody", parent=base["Normal"],
+        fontSize=10, fontName="Helvetica",
+        spaceAfter=2,
     )
     bullet_style = ParagraphStyle(
-        "RBullet", parent=styles["Normal"],
-        fontSize=10, leftIndent=16, spaceAfter=2,
+        "RBullet", parent=base["Normal"],
+        fontSize=10, fontName="Helvetica",
+        leftIndent=16, spaceAfter=1,
     )
 
-    all_lines = resume_text.strip().split("\n")
+    labeled = _label_lines(resume_text)
 
-    # Separate header (first two non-empty lines) from body
-    non_empty_seen = 0
-    header_lines: list[str] = []
-    body_start = 0
-    for i, line in enumerate(all_lines):
-        if line.strip():
-            non_empty_seen += 1
-            header_lines.append(line.strip())
-            if non_empty_seen == 2:
-                body_start = i + 1
-                break
+    # Split into page-break groups: header block + one block per section
+    groups: list[list] = []
+    current_group: list = []
 
-    body_lines = all_lines[body_start:]
+    for line, label in labeled:
+        s = line.strip()
 
-    # Build header block (name + contact, always kept together)
-    header_block: list = []
-    if len(header_lines) >= 1:
-        header_block.append(Paragraph(escape(header_lines[0]), name_style))
-    if len(header_lines) >= 2:
-        header_block.append(Paragraph(escape(header_lines[1]), contact_style))
+        if label == "empty":
+            current_group.append(Spacer(1, 3))
+            continue
 
-    # Split body into sections at ALL CAPS headers
-    raw_sections: list[list[str]] = []
-    current: list[str] = []
-    for line in body_lines:
-        stripped = line.strip()
-        if stripped and stripped.isupper() and len(stripped) > 2 and not stripped.startswith("•"):
-            if current:
-                raw_sections.append(current)
-            current = [line]
+        if label == "name":
+            current_group.append(Paragraph(escape(s), name_style))
+        elif label == "contact":
+            current_group.append(Paragraph(escape(s), contact_style))
+        elif label == "section":
+            # Start a new group at each section header
+            if current_group:
+                groups.append(current_group)
+            current_group = [Paragraph(escape(s), section_style)]
+        elif label == "company":
+            current_group.append(Paragraph(f"<u>{escape(s)}</u>", company_style))
+        elif label == "role":
+            current_group.append(Paragraph(escape(s), role_style))
+        elif label == "bullet":
+            text = escape(s.lstrip("•- ").strip())
+            current_group.append(Paragraph(f"• {text}", bullet_style))
         else:
-            current.append(line)
-    if current:
-        raw_sections.append(current)
+            current_group.append(Paragraph(escape(s), body_style))
 
-    story: list = [KeepTogether(header_block)]
+    if current_group:
+        groups.append(current_group)
 
-    for section_lines in raw_sections:
-        block: list = []
-        for line in section_lines:
-            stripped = line.strip()
-            if not stripped:
-                block.append(Spacer(1, 3))
-                continue
-            safe = escape(stripped)
-            if stripped.isupper() and len(stripped) > 2:
-                block.append(Paragraph(safe, section_style))
-            elif stripped.startswith("•") or stripped.startswith("-"):
-                block.append(Paragraph(f"- {escape(stripped.lstrip('•- '))}", bullet_style))
-            else:
-                block.append(Paragraph(safe, body_style))
-
-        story.append(CondPageBreak(1.5 * inch))
-        story.append(KeepTogether(block))
+    story: list = []
+    for i, group in enumerate(groups):
+        if i > 0:
+            story.append(CondPageBreak(1.5 * inch))
+        story.append(KeepTogether(group))
 
     return story

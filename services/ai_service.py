@@ -51,17 +51,19 @@ Use the exact requirement IDs provided. Be specific and ATS-optimized."""
 
 _GENERATION_SYSTEM = """You are an expert resume writer. Rewrite the provided resume incorporating all suggested improvements.
 
-Output the complete resume as plain text only — no preamble, no explanation, no markdown.
+Output plain text only — no markdown, no asterisks, no hashtags, no explanation.
 
-Header format (first two lines, both centered):
-- Line 1: Full name only
-- Line 2: email · phone · location · linkedin  (use the SAME separator character as the original resume; default to  ·  if unclear)
-
-Then:
-- One blank line
-- Section headers in ALL CAPS (e.g. EXPERIENCE, SKILLS, EDUCATION)
-- Bullet points using the • character
-- One blank line between sections"""
+Strict format:
+1. Line 1: Full name only
+2. Line 2: contact info separated by  |  (use the same separator as the original)
+3. Blank line
+4. Section headers in ALL CAPS on their own line (PROFESSIONAL SUMMARY, EXPERIENCE, TECHNICAL SKILLS, EDUCATION, etc.)
+5. Within EXPERIENCE:
+   - Employer name alone on its own line (e.g.  Intuit Inc.)
+   - Job title and dates on the very next line using this exact pattern:  Title | MM/YYYY – MM/YYYY  or  Title | MM/YYYY – Present
+   - Bullet points starting with •  (never use - or * for bullets)
+6. One blank line between major sections
+7. Keep all other sections (summary, skills, education) as they appear in the original"""
 
 
 def analyze_resume(resume_texts: list[str], jd_text: str, projects_texts: list[str]) -> dict:

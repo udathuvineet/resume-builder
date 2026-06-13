@@ -4,7 +4,7 @@ import streamlit as st
 
 from database.db import get_db
 from database.models import ProjectsDocument, Resume, SampleResume
-from services.pdf_parser import extract_text_from_pdf
+from services.pdf_parser import extract_text_from_docx, extract_text_from_pdf
 
 
 def _delete(model_class, item_id: str) -> str | None:
@@ -161,13 +161,16 @@ def render():
         st.caption("Portfolios or extra context for the AI (optional).")
 
         uploaded_p = st.file_uploader(
-            "Add context PDF", type=["pdf"],
+            "Add context PDF or DOCX", type=["pdf", "docx"],
             key=_uploader_key("proj"),
             label_visibility="collapsed",
         )
         if uploaded_p:
-            pdf_bytes = uploaded_p.read()
-            text = extract_text_from_pdf(pdf_bytes)
+            file_bytes = uploaded_p.read()
+            if uploaded_p.name.endswith(".docx"):
+                text = extract_text_from_docx(file_bytes)
+            else:
+                text = extract_text_from_pdf(file_bytes)
             with get_db() as db:
                 db.add(ProjectsDocument(
                     id=str(uuid.uuid4()),

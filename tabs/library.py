@@ -22,6 +22,18 @@ def _swap_order(rid_a: str, rid_b: str):
             a.order, b.order = b.order, a.order
 
 
+def _uploader_key(name: str) -> str:
+    """Return a key that increments each time we want to reset the uploader."""
+    k = f"_uploader_gen_{name}"
+    if k not in st.session_state:
+        st.session_state[k] = 0
+    return f"{name}_{st.session_state[k]}"
+
+
+def _reset_uploader(name: str):
+    st.session_state[f"_uploader_gen_{name}"] += 1
+
+
 def render():
     st.header("Document Library")
     st.caption("Upload the documents you want the AI to work with.")
@@ -34,8 +46,9 @@ def render():
         st.caption("PDFs to be optimized. First = primary.")
 
         uploaded = st.file_uploader(
-            "Add resume PDF", type=["pdf"], key="resume_uploader",
-            label_visibility="collapsed"
+            "Add resume PDF", type=["pdf"],
+            key=_uploader_key("resume"),
+            label_visibility="collapsed",
         )
         if uploaded:
             pdf_bytes = uploaded.read()
@@ -52,7 +65,7 @@ def render():
                         pdf_data=pdf_bytes,
                         order=count,
                     ))
-                st.success(f"Added {uploaded.name}")
+                _reset_uploader("resume")
                 st.rerun()
 
         with get_db() as db:
@@ -80,8 +93,9 @@ def render():
         st.caption("Reference style for generation (optional).")
 
         uploaded_s = st.file_uploader(
-            "Add sample PDF", type=["pdf"], key="sample_uploader",
-            label_visibility="collapsed"
+            "Add sample PDF", type=["pdf"],
+            key=_uploader_key("sample"),
+            label_visibility="collapsed",
         )
         if uploaded_s:
             pdf_bytes = uploaded_s.read()
@@ -93,7 +107,7 @@ def render():
                     content=text,
                     pdf_data=pdf_bytes,
                 ))
-            st.success(f"Added {uploaded_s.name}")
+            _reset_uploader("sample")
             st.rerun()
 
         with get_db() as db:
@@ -115,8 +129,9 @@ def render():
         st.caption("Portfolios or extra context for the AI (optional).")
 
         uploaded_p = st.file_uploader(
-            "Add context PDF", type=["pdf"], key="proj_uploader",
-            label_visibility="collapsed"
+            "Add context PDF", type=["pdf"],
+            key=_uploader_key("proj"),
+            label_visibility="collapsed",
         )
         if uploaded_p:
             pdf_bytes = uploaded_p.read()
@@ -127,7 +142,7 @@ def render():
                     filename=uploaded_p.name,
                     content=text,
                 ))
-            st.success(f"Added {uploaded_p.name}")
+            _reset_uploader("proj")
             st.rerun()
 
         with get_db() as db:

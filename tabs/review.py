@@ -1,5 +1,5 @@
-import streamlit as st
 import plotly.graph_objects as go
+import streamlit as st
 
 from database.db import get_db
 from database.models import AnalysisSession, Requirement, Suggestion
@@ -70,7 +70,7 @@ def render():
             return
 
         overall_score = session.overall_score or 0.0
-        reqs = (
+        all_reqs = (
             db.query(Requirement)
             .filter_by(session_id=selected_id)
             .order_by(Requirement.match_score)
@@ -78,10 +78,10 @@ def render():
         )
         suggs = db.query(Suggestion).filter_by(session_id=selected_id).all()
 
-        reqs_data = [{
+        all_reqs_data = [{
             "id": r.id, "text": r.text, "category": r.category,
             "match_score": r.match_score, "match_detail": r.match_detail,
-        } for r in reqs]
+        } for r in all_reqs]
 
         suggs_by_req: dict[str, list[dict]] = {}
         for s in suggs:
@@ -94,6 +94,9 @@ def render():
                 "is_selected": s.is_selected,
                 "section": s.section,
             })
+
+    # Only requirements that have suggestions (the gaps)
+    gap_reqs = [r for r in all_reqs_data if r["id"] in suggs_by_req]
 
     # ── Score summary ─────────────────────────────────────────────────────────
     col_gauge, col_metrics = st.columns([1, 2])
@@ -118,12 +121,11 @@ def render():
         st.plotly_chart(fig, use_container_width=True)
 
     with col_metrics:
-        high = sum(1 for r in reqs_data if r["match_score"] >= 0.75)
-        mid = sum(1 for r in reqs_data if 0.5 <= r["match_score"] < 0.75)
-        low = sum(1 for r in reqs_data if r["match_score"] < 0.5)
+        high = sum(1 for r in all_reqs_data if r["match_score"] >= 0.75)
+        mid  = sum(1 for r in all_reqs_data if 0.5 <= r["match_score"] < 0.75)
+        low  = sum(1 for r in all_reqs_data if r["match_score"] < 0.5)
         selected_count = sum(
-            len([s for s in suggs if s["is_selected"]])
-            for suggs in suggs_by_req.values()
+            1 for suggs in suggs_by_req.values() for s in suggs if s["is_selected"]
         )
         st.metric("Strong matches 🟢", high)
         st.metric("Partial matches 🟡", mid)
@@ -131,47 +133,53 @@ def render():
         st.metric("Improvements selected", selected_count)
 
     st.divider()
-    st.subheader("Requirements")
-    st.caption("Toggle suggestions to accept them. Edit the text if needed, then click outside to save.")
 
-    # ── Requirements list ─────────────────────────────────────────────────────
-    for req in reqs_data:
-        req_suggs = suggs_by_req.get(req["id"], [])
+    if not gap_reqs:
+        st.success("No gaps found — your resume matches all extracted requirements well.")
+        return
+
+    st.subheader(f"Gaps & Suggestions ({len(gap_reqs)})")
+    st.caption("Check a suggestion to accept it. Click outside the text box after editing to save.")
+
+    # ── Gaps only ─────────────────────────────────────────────────────────────
+    for req in gap_reqs:
+        req_suggs = suggs_by_req[req["id"]]
         score = req["match_score"]
-        icon = _score_icon(score)
-        title = f"{icon} {req['text'][:80]}{'...' if len(req['text']) > 80 else ''} — {score:.0%}"
+        title = f"{_score_icon(score)} {req['text'][:90]}{'...' if len(req['text']) > 90 else ''} — {score:.0%}"
 
         with st.expander(title, expanded=(score < 0.5)):
             st.markdown(f"**{req['text']}**")
             st.caption(f"Category: `{req['category']}`  •  Score: {score:.0%}")
             st.markdown(f"*{req['match_detail']}*")
+            st.markdown("---")
 
-            if req_suggs:
-                st.markdown("---")
-                st.markdown("**Suggested improvements:**")
-                for sugg in req_suggs:
-                    sel_key = f"sel_{sugg['id']}"
-                    edit_key = f"edit_{sugg['id']}"
-                    action = "Modify" if sugg["type"] == "MODIFY" else "Add"
-                    preview = (sugg["suggested_text"] or "")[:70]
+            for sugg in req_suggs:
+                sel_key  = f"sel_{sugg['id']}"
+                edit_key = f"edit_{sugg['id']}"
+                action   = "Modify" if sugg["type"] == "MODIFY" else "Add"
 
-                    st.checkbox(
-                        f"{action}: {preview}{'...' if len(sugg['suggested_text']) > 70 else ''}",
-                        value=sugg["is_selected"],
-                        key=sel_key,
-                        on_change=_toggle_suggestion,
-                        args=(sugg["id"], sel_key),
+                col_check, col_label = st.columns([1, 10])
+                is_checked = col_check.checkbox(
+                    "", value=sugg["is_selected"], key=sel_key,
+                    on_change=_toggle_suggestion, args=(sugg["id"], sel_key),
+                    label_visibility="collapsed",
+                )
+                col_label.markdown(
+                    f"**{action}** `{sugg.get('section') or 'resume'}`  \n"
+                    f"{sugg['suggested_text']}"
+                )
+
+                if is_checked or st.session_state.get(sel_key, sugg["is_selected"]):
+                    if sugg.get("original_text"):
+                        st.caption(f"Replaces: *{sugg['original_text']}*")
+                    st.text_area(
+                        "Edit",
+                        value=sugg.get("edited_text") or sugg["suggested_text"],
+                        height=90,
+                        key=edit_key,
+                        label_visibility="collapsed",
+                        on_change=_save_edit,
+                        args=(sugg["id"], edit_key),
                     )
 
-                    if st.session_state.get(sel_key, sugg["is_selected"]):
-                        if sugg.get("original_text"):
-                            st.caption(f"Replaces: *{sugg['original_text'][:100]}*")
-                        st.text_area(
-                            "Edit suggestion",
-                            value=sugg.get("edited_text") or sugg["suggested_text"],
-                            height=80,
-                            key=edit_key,
-                            label_visibility="collapsed",
-                            on_change=_save_edit,
-                            args=(sugg["id"], edit_key),
-                        )
+                st.markdown("")

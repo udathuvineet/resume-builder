@@ -44,11 +44,14 @@ def render():
             "edited_text": s.edited_text,
             "section": s.section,
         } for s in selected_suggs]
-        primary_resume = resumes[0].content if resumes else ""
 
-    if not resumes:
-        st.warning("Upload a resume in the **Library** tab first.")
-        return
+        if not resumes:
+            st.warning("Upload a resume in the **Library** tab first.")
+            return
+
+        primary_resume = resumes[0].content
+        primary_bytes = bytes(resumes[0].pdf_data) if resumes[0].pdf_data else None
+        primary_filename = resumes[0].filename
 
     st.metric("Accepted improvements", len(sugg_data))
 
@@ -70,6 +73,7 @@ def render():
             ai_service.stream_resume_generation(primary_resume, sugg_data)
         )
         st.session_state["generated_resume"] = generated
+        st.session_state["generated_resume_source"] = (primary_bytes, primary_filename)
 
         with get_db() as db:
             s = db.query(AnalysisSession).filter_by(id=selected_id).first()
@@ -78,7 +82,7 @@ def render():
 
         st.rerun()
 
-    # ── Download (shown after generation) ────────────────────────────────────
+    # ── Download ──────────────────────────────────────────────────────────────
     generated_text: str | None = st.session_state.get("generated_resume")
     if generated_text:
         st.subheader("Download")
@@ -88,12 +92,14 @@ def render():
             height=350,
             key="generated_resume_edit",
         )
-        # Use whatever the user may have edited in the text area
         final_text = st.session_state.get("generated_resume_edit", generated_text)
+        orig_bytes, orig_filename = st.session_state.get(
+            "generated_resume_source", (primary_bytes, primary_filename)
+        )
 
         col1, col2 = st.columns(2)
         with col1:
-            docx_bytes = resume_generator.generate_docx(final_text)
+            docx_bytes = resume_generator.generate_docx(final_text, orig_bytes, orig_filename)
             st.download_button(
                 "⬇ Download DOCX",
                 data=docx_bytes,

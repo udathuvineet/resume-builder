@@ -2,7 +2,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from database.db import get_db
-from database.models import AnalysisSession, Requirement, Suggestion
+from database.models import (AnalysisSession, AuditVerdict, ContentAuditItem,
+                              Requirement, Suggestion)
 
 
 def _score_color(score: float) -> str:
@@ -26,6 +27,13 @@ def _toggle_suggestion(sugg_id: str, key: str):
         s = db.query(Suggestion).filter_by(id=sugg_id).first()
         if s:
             s.is_selected = st.session_state[key]
+
+
+def _dismiss_audit(item_id: str):
+    with get_db() as db:
+        item = db.query(ContentAuditItem).filter_by(id=item_id).first()
+        if item:
+            item.is_dismissed = True
 
 
 def _save_edit(sugg_id: str, key: str):
@@ -94,6 +102,20 @@ def render():
                 "is_selected": s.is_selected,
                 "section": s.section,
             })
+
+        audit_rows = (
+            db.query(ContentAuditItem)
+            .filter_by(session_id=selected_id, is_dismissed=False)
+            .order_by(ContentAuditItem.section)
+            .all()
+        )
+        audit_data = [{
+            "id": a.id,
+            "section": a.section or "General",
+            "text": a.text,
+            "verdict": a.verdict.value,
+            "reason": a.reason,
+        } for a in audit_rows]
 
     # Only requirements that have suggestions (the gaps)
     gap_reqs = [r for r in all_reqs_data if r["id"] in suggs_by_req]
@@ -183,3 +205,41 @@ def render():
                     )
 
                 st.markdown("")
+
+    # ── Content audit ─────────────────────────────────────────────────────────
+    if audit_data:
+        st.divider()
+        st.subheader(f"Existing Content to Reconsider ({len(audit_data)})")
+        st.caption(
+            "These are bullets and statements already in your resume that may be "
+            "hurting your match — either too generic or not relevant to this role."
+        )
+
+        _VERDICT_STYLE = {
+            "remove":   ("🔴", "Remove",   "#dc3545"),
+            "rephrase": ("🟡", "Rephrase", "#e6a817"),
+        }
+
+        # Group by section
+        by_section: dict[str, list[dict]] = {}
+        for item in audit_data:
+            by_section.setdefault(item["section"], []).append(item)
+
+        for section, items in sorted(by_section.items()):
+            with st.expander(f"**{section}** — {len(items)} item(s)", expanded=True):
+                for item in items:
+                    icon, label, color = _VERDICT_STYLE.get(
+                        item["verdict"], ("⚪", item["verdict"].title(), "#888")
+                    )
+                    col_badge, col_content, col_dismiss = st.columns([1, 9, 1])
+                    col_badge.markdown(
+                        f"<span style='color:{color};font-weight:bold'>{icon} {label}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    col_content.markdown(f"**{item['text']}**")
+                    col_content.caption(item["reason"])
+                    if col_dismiss.button("✕", key=f"dismiss_{item['id']}",
+                                          help="Dismiss this suggestion"):
+                        _dismiss_audit(item["id"])
+                        st.rerun()
+                    st.markdown("")

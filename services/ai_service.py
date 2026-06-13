@@ -49,6 +49,26 @@ Return ONLY a valid JSON object (no markdown fences):
 
 Use the exact requirement IDs provided. Be specific and ATS-optimized."""
 
+_AUDIT_SYSTEM = """You are an expert resume coach. Given a resume and a job description, evaluate every bullet point and statement in the resume.
+
+For each item decide:
+- "rephrase": content is relevant but generic, vague, or not worded to match this JD's language/priorities
+- "remove": content is irrelevant to this role and wastes space
+
+Only return items that need attention — skip anything that is strong and well-targeted.
+
+Return ONLY valid JSON (no markdown fences):
+{
+  "audit": [
+    {
+      "section": "Experience | Skills | Summary | Education | etc.",
+      "text": "exact text of the bullet or statement from the resume",
+      "verdict": "rephrase | remove",
+      "reason": "specific explanation of the problem and what to do instead"
+    }
+  ]
+}"""
+
 _GENERATION_SYSTEM = """You are an expert resume writer. Rewrite the provided resume incorporating all suggested improvements.
 
 Output plain text only — no markdown, no asterisks, no hashtags, no explanation.
@@ -104,6 +124,23 @@ def generate_suggestions(requirements: list[dict], resume_texts: list[str]) -> d
                 f"Requirements needing improvement:\n{reqs_block}\n\n"
                 f"Resume:\n{resume_block}\n\n"
                 "Generate suggestions and return JSON."
+            )
+        }]
+    )
+    return _parse_json(response.content[0].text)
+
+
+def audit_resume_content(resume_text: str, jd_text: str) -> dict:
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=4096,
+        system=_AUDIT_SYSTEM,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Job Description:\n{jd_text}\n\n"
+                f"Resume:\n{resume_text}\n\n"
+                "Audit every bullet and statement. Return only items needing attention."
             )
         }]
     )

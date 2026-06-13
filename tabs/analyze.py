@@ -3,8 +3,9 @@ import uuid
 import streamlit as st
 
 from database.db import get_db
-from database.models import (AnalysisSession, ProjectsDocument, Requirement,
-                              Resume, SessionStatus, Suggestion, SuggestionType)
+from database.models import (AnalysisSession, AuditVerdict, ContentAuditItem,
+                              ProjectsDocument, Requirement, Resume,
+                              SessionStatus, Suggestion, SuggestionType)
 from services import ai_service
 
 _SUGGESTION_THRESHOLD = 0.8
@@ -137,6 +138,33 @@ def _run_analysis(jd: str, resume_texts: list[str], projects_texts: list[str]):
                 with get_db() as db:
                     s = db.query(AnalysisSession).filter_by(id=session_id).first()
                     s.status = SessionStatus.COMPLETE
+
+            # ── Step 3: content audit ─────────────────────────────────────────
+            st.write("Auditing existing resume content for relevance...")
+            try:
+                audit_result = ai_service.audit_resume_content(
+                    resume_texts[0], jd
+                )
+                audit_items = audit_result.get("audit", [])
+                valid_verdicts = {v.value for v in AuditVerdict}
+                with get_db() as db:
+                    for item in audit_items:
+                        v = item.get("verdict", "").lower()
+                        if v not in valid_verdicts:
+                            continue
+                        db.add(ContentAuditItem(
+                            id=str(uuid.uuid4()),
+                            session_id=session_id,
+                            section=item.get("section"),
+                            text=item.get("text", ""),
+                            verdict=AuditVerdict(v),
+                            reason=item.get("reason", ""),
+                        ))
+                flagged = len([i for i in audit_items
+                               if i.get("verdict", "").lower() in valid_verdicts])
+                st.write(f"Flagged **{flagged}** existing bullet(s) for review.")
+            except Exception as audit_exc:
+                st.warning(f"Content audit skipped: {audit_exc}")
 
             status_widget.update(label="Analysis complete!", state="complete")
             st.success("Done — switch to the **Review** tab to see results.")

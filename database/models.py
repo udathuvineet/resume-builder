@@ -22,6 +22,11 @@ class SuggestionType(str, enum.Enum):
     ADD = "ADD"
 
 
+class AuditVerdict(str, enum.Enum):
+    REPHRASE = "rephrase"
+    REMOVE = "remove"
+
+
 class UserProfile(Base):
     __tablename__ = "user_profile"
     id = Column(String, primary_key=True, default="default")
@@ -74,6 +79,7 @@ class AnalysisSession(Base):
 
     requirements = relationship("Requirement", back_populates="session", cascade="all, delete-orphan", order_by="Requirement.order")
     suggestions = relationship("Suggestion", back_populates="session", cascade="all, delete-orphan")
+    audit_items = relationship("ContentAuditItem", back_populates="session", cascade="all, delete-orphan")
 
 
 class Requirement(Base):
@@ -107,3 +113,17 @@ class Suggestion(Base):
 
     session = relationship("AnalysisSession", back_populates="suggestions")
     requirement = relationship("Requirement", back_populates="suggestions")
+
+
+class ContentAuditItem(Base):
+    __tablename__ = "content_audit_items"
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("analysis_sessions.id", ondelete="CASCADE"), nullable=False)
+    section = Column(String, nullable=True)
+    text = Column(Text, nullable=False)
+    verdict = Column(SAEnum(AuditVerdict), nullable=False)
+    reason = Column(Text, nullable=False)
+    is_dismissed = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("AnalysisSession", back_populates="audit_items")

@@ -64,6 +64,7 @@ def _docx_from_template(resume_text: str, template_bytes: bytes) -> bytes:
 def _extract_docx_styles(doc: Document) -> dict:
     styles = {
         "name":    {"font": "Calibri", "size": 16.0, "bold": True,  "align": WD_ALIGN_PARAGRAPH.CENTER},
+        "contact": {"font": "Calibri", "size": 10.0, "bold": False, "align": WD_ALIGN_PARAGRAPH.CENTER},
         "section": {"font": "Calibri", "size": 11.0, "bold": True,  "align": WD_ALIGN_PARAGRAPH.LEFT},
         "body":    {"font": "Calibri", "size": 10.5, "bold": False, "align": WD_ALIGN_PARAGRAPH.LEFT},
         "bullet":  {"font": "Calibri", "size": 10.5, "bold": False, "align": WD_ALIGN_PARAGRAPH.LEFT,
@@ -74,7 +75,6 @@ def _extract_docx_styles(doc: Document) -> dict:
         },
     }
 
-    # Page margins
     if doc.sections:
         s = doc.sections[0]
         styles["margins"] = {
@@ -83,7 +83,7 @@ def _extract_docx_styles(doc: Document) -> dict:
         }
 
     non_empty = [p for p in doc.paragraphs if p.text.strip()]
-    found = {"name": False, "section": False, "body": False, "bullet": False}
+    found = {"name": False, "contact": False, "section": False, "body": False, "bullet": False}
 
     for i, para in enumerate(non_empty):
         text = para.text.strip()
@@ -117,13 +117,21 @@ def _extract_docx_styles(doc: Document) -> dict:
         if i == 0 and not found["name"]:
             styles["name"].update(info)
             found["name"] = True
+        elif i == 1 and not found["contact"]:
+            # Second paragraph = contact line; use name font but smaller
+            contact_info = dict(info)
+            contact_info["bold"] = False
+            if "size" not in contact_info:
+                contact_info["size"] = max(8.0, styles["name"].get("size", 11.0) - 4)
+            styles["contact"].update(contact_info)
+            found["contact"] = True
         elif text.isupper() and len(text) > 2 and not found["section"]:
             styles["section"].update(info)
             found["section"] = True
         elif (text.startswith("•") or text.startswith("-")) and not found["bullet"]:
             styles["bullet"].update(info)
             found["bullet"] = True
-        elif not text.isupper() and not text.startswith("•") and i > 0 and not found["body"]:
+        elif not text.isupper() and not text.startswith("•") and i > 1 and not found["body"]:
             styles["body"].update(info)
             found["body"] = True
 
@@ -135,7 +143,7 @@ def _extract_docx_styles(doc: Document) -> dict:
 
 def _populate_docx(doc: Document, resume_text: str, styles: dict):
     lines = resume_text.strip().split("\n")
-    first_line = True
+    line_index = 0  # counts non-empty lines
 
     for line in lines:
         stripped = line.strip()
@@ -146,15 +154,18 @@ def _populate_docx(doc: Document, resume_text: str, styles: dict):
             p.paragraph_format.space_after = Pt(2)
             continue
 
-        if first_line:
+        if line_index == 0:
             _add_styled_para(doc, stripped, styles["name"])
-            first_line = False
+        elif line_index == 1:
+            _add_styled_para(doc, stripped, styles["contact"])
         elif stripped.isupper() and len(stripped) > 2:
             _add_styled_para(doc, stripped, styles["section"])
         elif stripped.startswith("•") or stripped.startswith("-"):
             _add_styled_para(doc, stripped.lstrip("•- "), styles["bullet"])
         else:
             _add_styled_para(doc, stripped, styles["body"])
+
+        line_index += 1
 
 
 def _add_styled_para(doc: Document, text: str, style: dict):
@@ -193,6 +204,7 @@ def _docx_basic(resume_text: str) -> bytes:
 
     default_styles = {
         "name":    {"font": "Calibri", "size": 16.0, "bold": True,  "align": WD_ALIGN_PARAGRAPH.CENTER},
+        "contact": {"font": "Calibri", "size": 10.0, "bold": False, "align": WD_ALIGN_PARAGRAPH.CENTER},
         "section": {"font": "Calibri", "size": 11.0, "bold": True,  "align": WD_ALIGN_PARAGRAPH.LEFT},
         "body":    {"font": "Calibri", "size": 10.5, "bold": False, "align": WD_ALIGN_PARAGRAPH.LEFT},
         "bullet":  {"font": "Calibri", "size": 10.5, "bold": False, "align": WD_ALIGN_PARAGRAPH.LEFT,
@@ -213,13 +225,17 @@ def _build_pdf_story(resume_text: str) -> list:
     name_style = ParagraphStyle(
         "RName", parent=styles["Normal"],
         fontSize=16, fontName="Helvetica-Bold",
-        alignment=1, spaceAfter=4,
+        alignment=1, spaceAfter=2,
+    )
+    contact_style = ParagraphStyle(
+        "RContact", parent=styles["Normal"],
+        fontSize=10, fontName="Helvetica",
+        alignment=1, spaceAfter=6,
     )
     section_style = ParagraphStyle(
         "RSection", parent=styles["Normal"],
         fontSize=11, fontName="Helvetica-Bold",
         spaceBefore=8, spaceAfter=3,
-        borderPadding=(0, 0, 2, 0),
     )
     body_style = ParagraphStyle(
         "RBody", parent=styles["Normal"],
@@ -230,11 +246,33 @@ def _build_pdf_story(resume_text: str) -> list:
         fontSize=10, leftIndent=16, spaceAfter=2,
     )
 
-    # Split into sections (each starting at an ALL CAPS header)
+    all_lines = resume_text.strip().split("\n")
+
+    # Separate header (first two non-empty lines) from body
+    non_empty_seen = 0
+    header_lines: list[str] = []
+    body_start = 0
+    for i, line in enumerate(all_lines):
+        if line.strip():
+            non_empty_seen += 1
+            header_lines.append(line.strip())
+            if non_empty_seen == 2:
+                body_start = i + 1
+                break
+
+    body_lines = all_lines[body_start:]
+
+    # Build header block (name + contact, always kept together)
+    header_block: list = []
+    if len(header_lines) >= 1:
+        header_block.append(Paragraph(escape(header_lines[0]), name_style))
+    if len(header_lines) >= 2:
+        header_block.append(Paragraph(escape(header_lines[1]), contact_style))
+
+    # Split body into sections at ALL CAPS headers
     raw_sections: list[list[str]] = []
     current: list[str] = []
-
-    for line in resume_text.strip().split("\n"):
+    for line in body_lines:
         stripped = line.strip()
         if stripped and stripped.isupper() and len(stripped) > 2 and not stripped.startswith("•"):
             if current:
@@ -242,42 +280,27 @@ def _build_pdf_story(resume_text: str) -> list:
             current = [line]
         else:
             current.append(line)
-
     if current:
         raw_sections.append(current)
 
-    story: list = []
-    first_section = True
+    story: list = [KeepTogether(header_block)]
 
     for section_lines in raw_sections:
         block: list = []
-        first_line_in_section = True
-
         for line in section_lines:
             stripped = line.strip()
             if not stripped:
                 block.append(Spacer(1, 3))
                 continue
-
             safe = escape(stripped)
-
-            if first_section and first_line_in_section:
-                block.append(Paragraph(safe, name_style))
-            elif stripped.isupper() and len(stripped) > 2:
+            if stripped.isupper() and len(stripped) > 2:
                 block.append(Paragraph(safe, section_style))
             elif stripped.startswith("•") or stripped.startswith("-"):
                 block.append(Paragraph(f"- {escape(stripped.lstrip('•- '))}", bullet_style))
             else:
                 block.append(Paragraph(safe, body_style))
 
-            first_line_in_section = False
-
-        if not first_section:
-            # Insert a conditional page break before this section if less than
-            # 1.5 inches remain — keeps the header with its first few items
-            story.append(CondPageBreak(1.5 * inch))
-
+        story.append(CondPageBreak(1.5 * inch))
         story.append(KeepTogether(block))
-        first_section = False
 
     return story

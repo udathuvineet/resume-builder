@@ -52,8 +52,13 @@ Use the exact requirement IDs provided. Be specific and ATS-optimized."""
 _GENERATION_SYSTEM = """You are an expert resume writer. Rewrite the provided resume incorporating all suggested improvements.
 
 Output the complete resume as plain text only — no preamble, no explanation, no markdown.
-Format:
-- Name and contact on first lines
+
+Header format (first two lines, both centered):
+- Line 1: Full name only
+- Line 2: email · phone · location · linkedin  (use the SAME separator character as the original resume; default to  ·  if unclear)
+
+Then:
+- One blank line
 - Section headers in ALL CAPS (e.g. EXPERIENCE, SKILLS, EDUCATION)
 - Bullet points using the • character
 - One blank line between sections"""
@@ -117,16 +122,20 @@ def stream_resume_generation(
 
     contact_note = ""
     if profile:
-        parts = [v for v in [
-            profile.get("name"), profile.get("email"), profile.get("phone"),
+        name = profile.get("name", "").strip()
+        contact_parts = [v.strip() for v in [
+            profile.get("email"), profile.get("phone"),
             profile.get("location"), profile.get("linkedin"),
-        ] if v]
-        if parts:
-            contact_note = (
-                f"\n\nIMPORTANT: The resume header must include exactly this contact line "
-                f"(all on one line, separated by  |  ):\n"
-                f"{' | '.join(parts)}"
-            )
+        ] if v and v.strip()]
+        if name or contact_parts:
+            contact_note = "\n\nIMPORTANT — use exactly this header (two lines, centered):"
+            if name:
+                contact_note += f"\nLine 1: {name}"
+            if contact_parts:
+                contact_note += (
+                    f"\nLine 2: {' · '.join(contact_parts)}"
+                    "\n(Replace · with the same separator used in the original resume if different)"
+                )
 
     prompt = (
         f"Original Resume:\n{original_resume}\n\n"

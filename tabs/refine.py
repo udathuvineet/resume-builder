@@ -74,7 +74,8 @@ def render():
     current_id = st.session_state.get("current_session_id")
     ids = list(options.values())
     default_idx = ids.index(current_id) if current_id in ids else 0
-    selected_label = st.selectbox("Analysis session", list(options.keys()), index=default_idx)
+    selected_label = st.selectbox("Analysis session", list(options.keys()), index=default_idx,
+                                   key="session_select_refine")
     selected_id = options[selected_label]
     st.session_state["current_session_id"] = selected_id
 
@@ -87,18 +88,16 @@ def render():
         resume_texts = [r.content for r in resumes]
         resume_text = resume_texts[0] if resume_texts else ""
 
-        all_reqs = (
-            db.query(Requirement)
+        all_reqs = [
+            {"id": r.id, "text": r.text, "match_score": r.match_score,
+             "match_detail": r.match_detail, "category": r.category}
+            for r in db.query(Requirement)
             .filter_by(session_id=selected_id)
             .order_by(Requirement.match_score)
             .all()
-        )
-        req_map = {r.id: r.text for r in all_reqs}
-        gap_reqs = [
-            {"id": r.id, "text": r.text, "match_score": r.match_score,
-             "match_detail": r.match_detail, "category": r.category}
-            for r in all_reqs if r.match_score < _SUGGESTION_THRESHOLD
         ]
+        req_map = {r["id"]: r["text"] for r in all_reqs}
+        gap_reqs = [r for r in all_reqs if r["match_score"] < _SUGGESTION_THRESHOLD]
 
         # Claude's accepted suggestions
         claude_suggs = (
@@ -223,13 +222,13 @@ def render():
         with col_detail:
             st.markdown(f"*{match_result.summary}*")
             st.markdown("**Per-requirement scores**")
-            for req in sorted(all_reqs, key=lambda r: scores_by_req.get(r.id, {}).get("score", 1.0)):
-                r_data = scores_by_req.get(req.id, {})
+            for req in sorted(all_reqs, key=lambda r: scores_by_req.get(r["id"], {}).get("score", 1.0)):
+                r_data = scores_by_req.get(req["id"], {})
                 r_score = r_data.get("score", None)
                 if r_score is None:
                     continue
                 icon = "🟢" if r_score >= 0.75 else ("🟡" if r_score >= 0.5 else "🔴")
-                with st.expander(f"{icon} {req.text[:80]} — {r_score:.0%}", expanded=False):
+                with st.expander(f"{icon} {req['text'][:80]} — {r_score:.0%}", expanded=False):
                     st.caption(r_data.get("detail", ""))
 
     st.divider()

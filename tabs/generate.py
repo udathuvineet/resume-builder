@@ -84,7 +84,8 @@ def render():
     col_sel, col_co = st.columns([3, 2])
     with col_sel:
         selected_label = st.selectbox(
-            "Analysis session", list(options.keys()), index=default_idx
+            "Analysis session", list(options.keys()), index=default_idx,
+            key="session_select_generate",
         )
     with col_co:
         company = st.text_input(

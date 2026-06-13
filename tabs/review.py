@@ -66,7 +66,8 @@ def render():
     ids = list(options.values())
     default_idx = ids.index(current_id) if current_id in ids else 0
 
-    selected_label = st.selectbox("Analysis session", list(options.keys()), index=default_idx)
+    selected_label = st.selectbox("Analysis session", list(options.keys()), index=default_idx,
+                                   key="session_select_review")
     selected_id = options[selected_label]
     st.session_state["current_session_id"] = selected_id
 

@@ -12,7 +12,7 @@ from services.resume_generator import _label_lines
 
 
 def _score_color(score: float) -> str:
-    if score >= 0.75:
+    if score >= 0.8:
         return "#28a745"
     if score >= 0.5:
         return "#e6a817"
@@ -20,7 +20,7 @@ def _score_color(score: float) -> str:
 
 
 def _score_icon(score: float) -> str:
-    if score >= 0.75:
+    if score >= 0.8:
         return "🟢"
     if score >= 0.5:
         return "🟡"
@@ -257,7 +257,7 @@ def render():
             .all()
         )
         options = {
-            f"{s.job_description[:70]}... [{s.status.value}]": s.id
+            f"{s.created_at.strftime('%m/%d %H:%M') if s.created_at else '?'} | {s.job_description[:55]}...": s.id
             for s in sessions
         }
 
@@ -274,7 +274,13 @@ def render():
         key="session_select_review",
     )
     selected_id = options[selected_label]
+    prev_id = st.session_state.get("current_session_id")
     st.session_state["current_session_id"] = selected_id
+    if selected_id != prev_id:
+        for _k in ["session_select_refine", "session_select_generate"]:
+            st.session_state.pop(_k, None)
+        for _k in ["generated_resume", "generated_resume_source", "generated_sugg_data", "generated_req_map"]:
+            st.session_state.pop(_k, None)
 
     # ── Load data ─────────────────────────────────────────────────────────────
     with get_db() as db:
@@ -328,9 +334,9 @@ def render():
         resume_text = resume_texts[0] if resume_texts else ""
 
     resume_bullets = _parse_resume_bullets(resume_text)
-    gap_reqs     = [r for r in all_reqs_data if r["id"] in suggs_by_req]
-    matched_reqs = [r for r in all_reqs_data
-                    if r["match_score"] >= 0.75 and r["id"] not in suggs_by_req]
+    # Threshold aligned with suggestion generation in analyze.py (0.8)
+    gap_reqs     = [r for r in all_reqs_data if r["match_score"] < 0.8]
+    matched_reqs = [r for r in all_reqs_data if r["match_score"] >= 0.8]
 
     # ── Score summary ─────────────────────────────────────────────────────────
     col_gauge, col_metrics = st.columns([1, 2])
@@ -355,8 +361,8 @@ def render():
         st.plotly_chart(fig, use_container_width=True)
 
     with col_metrics:
-        high = sum(1 for r in all_reqs_data if r["match_score"] >= 0.75)
-        mid  = sum(1 for r in all_reqs_data if 0.5 <= r["match_score"] < 0.75)
+        high = sum(1 for r in all_reqs_data if r["match_score"] >= 0.8)
+        mid  = sum(1 for r in all_reqs_data if 0.5 <= r["match_score"] < 0.8)
         low  = sum(1 for r in all_reqs_data if r["match_score"] < 0.5)
         selected_count = sum(
             1 for suggs_list in suggs_by_req.values()
@@ -380,7 +386,7 @@ def render():
     )
 
     for req in gap_reqs:
-        req_suggs = suggs_by_req[req["id"]]
+        req_suggs = suggs_by_req.get(req["id"], [])
         score = req["match_score"]
         title = f"{_score_icon(score)} {req['text'][:90]}{'...' if len(req['text']) > 90 else ''} — {score:.0%}"
 
@@ -389,8 +395,16 @@ def render():
             st.caption(f"Category: `{req['category']}`  •  Score: {score:.0%}")
             st.markdown(f"*{req['match_detail']}*")
             st.markdown("---")
-            for sugg in req_suggs:
-                _render_suggestion(sugg, resume_bullets)
+            if req_suggs:
+                for sugg in req_suggs:
+                    _render_suggestion(sugg, resume_bullets)
+            else:
+                st.caption("No suggestions generated for this gap yet.")
+                if st.button("Generate suggestion", key=f"gen_gap_{req['id']}",
+                             use_container_width=False):
+                    with st.spinner("Generating suggestion…"):
+                        _generate_improvement_for_req(req, selected_id, resume_texts)
+                    st.rerun()
 
     # ── Strong matches ────────────────────────────────────────────────────────
     if matched_reqs:
@@ -402,6 +416,7 @@ def render():
             )
             for req in sorted(matched_reqs, key=lambda r: r["match_score"], reverse=True):
                 score = req["match_score"]
+                req_suggs = suggs_by_req.get(req["id"], [])
                 col_info, col_btn = st.columns([8, 2])
                 with col_info:
                     st.markdown(f"**{req['text']}**")
@@ -412,6 +427,9 @@ def render():
                         with st.spinner("Generating suggestion…"):
                             _generate_improvement_for_req(req, selected_id, resume_texts)
                         st.rerun()
+                if req_suggs:
+                    for sugg in req_suggs:
+                        _render_suggestion(sugg, resume_bullets)
                 st.markdown("")
 
     # ── Content audit ─────────────────────────────────────────────────────────

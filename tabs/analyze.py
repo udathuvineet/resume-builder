@@ -25,7 +25,9 @@ def render():
             .all()
         )
         past_sessions = [
-            (s.id, s.job_description[:70] + "...", s.status.value, s.overall_score)
+            (s.id,
+             f"{s.created_at.strftime('%m/%d %H:%M') if s.created_at else '?'} — {s.job_description[:55]}...",
+             s.status.value, s.overall_score)
             for s in sessions
         ]
 
@@ -168,6 +170,16 @@ def _run_analysis(jd: str, resume_texts: list[str], projects_texts: list[str]):
                 st.write(f"Flagged **{flagged}** existing bullet(s) for review.")
             except Exception as audit_exc:
                 st.warning(f"Content audit skipped: {audit_exc}")
+
+            # Keep only the 10 most recent sessions
+            with get_db() as db:
+                all_sessions = (
+                    db.query(AnalysisSession)
+                    .order_by(AnalysisSession.created_at.desc())
+                    .all()
+                )
+                for old in all_sessions[10:]:
+                    db.delete(old)
 
             status_widget.update(label="Analysis complete!", state="complete")
             st.success("Done — switch to the **Review** tab to see results.")

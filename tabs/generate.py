@@ -75,7 +75,10 @@ def render():
             .order_by(AnalysisSession.created_at.desc())
             .all()
         )
-        options = {f"{s.job_description[:70]}...": s.id for s in sessions}
+        options = {
+            f"{s.created_at.strftime('%m/%d %H:%M') if s.created_at else '?'} | {s.job_description[:55]}...": s.id
+            for s in sessions
+        }
 
     if not options:
         st.info("No analyses yet. Complete one in the **Analyze** tab.")
@@ -98,7 +101,13 @@ def render():
         )
 
     selected_id = options[selected_label]
+    prev_id = st.session_state.get("current_session_id")
     st.session_state["current_session_id"] = selected_id
+    if selected_id != prev_id:
+        for _k in ["session_select_review", "session_select_refine"]:
+            st.session_state.pop(_k, None)
+        for _k in ["generated_resume", "generated_resume_source", "generated_sugg_data", "generated_req_map"]:
+            st.session_state.pop(_k, None)
 
     # ── Load data ─────────────────────────────────────────────────────────────
     with get_db() as db:

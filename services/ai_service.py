@@ -371,6 +371,30 @@ def refine_suggestions_with_gpt4(
     return _parse_json(response.choices[0].message.content)
 
 
+def suggest_bullet_integration(original_bullet: str, suggestion_text: str, section: str) -> str:
+    """Return a single merged bullet combining original_bullet with suggestion_text."""
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=200,
+        system=(
+            "You are a resume editor. Merge new content into an existing resume bullet point. "
+            "Write in clear, direct business English. "
+            "No em dashes, no AI cliches, no filler words. "
+            "Return ONLY the merged bullet text — one line, no prefix, no explanation."
+        ),
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Section: {section}\n"
+                f"Existing bullet: {original_bullet}\n"
+                f"Content to integrate: {suggestion_text}\n\n"
+                "Write the merged bullet point."
+            )
+        }]
+    )
+    return response.content[0].text.strip().lstrip("•- ").strip()
+
+
 def _parse_json(text: str) -> dict:
     match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
     if match:

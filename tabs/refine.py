@@ -48,8 +48,7 @@ def _set_gpt4_weave_original(sugg_id: str, key: str):
         s = db.query(GPT4Suggestion).filter_by(id=sugg_id).first()
         if s:
             s.original_text = val
-            if not s.edited_text:
-                s.edited_text = val
+            s.edited_text = None  # clear so AI suggestion is triggered fresh
 
 
 def _clear_gpt4_weave_original(sugg_id: str):
@@ -60,11 +59,18 @@ def _clear_gpt4_weave_original(sugg_id: str):
             s.edited_text = None
 
 
+def _save_gpt4_ai_merge(sugg_id: str, merged: str):
+    with get_db() as db:
+        s = db.query(GPT4Suggestion).filter_by(id=sugg_id).first()
+        if s:
+            s.edited_text = merged
+
+
 def _parse_resume_bullets(resume_text: str) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {}
     current = "General"
     for line, label in _label_lines(resume_text):
-        s = line.strip()
+        s = " ".join(line.split())  # normalize whitespace to single line
         if not s:
             continue
         if label == "section":
@@ -142,20 +148,29 @@ def _render_gpt4_suggestion(sugg: dict, resume_bullets: dict[str, list[str]]):
                     options=options,
                     index=current_idx,
                     key=target_key,
+                    format_func=lambda x: x if x == placeholder else (
+                        x[:90] + "…" if len(x) > 90 else x
+                    ),
                     on_change=_set_gpt4_weave_original,
                     args=(sugg_id, target_key),
                 )
                 if has_target:
-                    st.caption(f"Original: *{current_original}*")
+                    col_ai, col_spacer = st.columns([2, 5])
+                    if col_ai.button("✨ AI Suggest Integration", key=f"g4_ai_merge_{sugg_id}"):
+                        with st.spinner("Generating integrated version…"):
+                            merged = ai_service.suggest_bullet_integration(
+                                current_original, sugg["suggested_text"], section
+                            )
+                            _save_gpt4_ai_merge(sugg_id, merged)
+                        st.rerun()
                     st.text_area(
-                        "Edit blended version",
+                        "Edit integrated version",
                         value=sugg.get("edited_text") or current_original,
                         height=90, key=edit_key,
                         label_visibility="collapsed",
                         on_change=_save_gpt4_edit,
                         args=(sugg_id, edit_key),
                     )
-                    st.caption("Edit the text above to blend the suggestion into the existing point.")
         else:
             if has_target:
                 _clear_gpt4_weave_original(sugg_id)

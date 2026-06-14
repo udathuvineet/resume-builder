@@ -114,6 +114,12 @@ class Suggestion(Base):
     is_selected = Column(Boolean, default=False)
     type = Column(SAEnum(SuggestionType), default=SuggestionType.MODIFY)
     section = Column(String, nullable=True)
+    # Detailed review fields (null on older sessions)
+    gap_addressed = Column(Text, nullable=True)
+    evidence_type = Column(String, nullable=True)        # direct|inferred|no_evidence
+    evidence_explanation = Column(Text, nullable=True)
+    reasoning = Column(Text, nullable=True)
+    impact = Column(String, nullable=True)               # high|medium|low
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -132,6 +138,11 @@ class ContentAuditItem(Base):
     is_dismissed = Column(Boolean, default=False)
     # None = pending action, "" = marked for removal, any text = accepted rephrase
     accepted_replacement = Column(Text, nullable=True)
+    # Detailed review fields (null on older sessions)
+    relevance = Column(String, nullable=True)            # high|medium|low
+    evidence_type = Column(String, nullable=True)        # direct|inferred|no_evidence
+    evidence_explanation = Column(Text, nullable=True)
+    suggested_action = Column(String, nullable=True)     # remove|shorten|merge
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("AnalysisSession", back_populates="audit_items")

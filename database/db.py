@@ -21,17 +21,28 @@ def _run_migrations():
     """Apply additive schema changes that create_all cannot handle on existing tables."""
     with engine.connect() as conn:
         if engine.dialect.name == "postgresql":
-            conn.execute(text(
-                "ALTER TABLE content_audit_items "
-                "ADD COLUMN IF NOT EXISTS accepted_replacement TEXT"
-            ))
+            for stmt in [
+                "ALTER TABLE content_audit_items ADD COLUMN IF NOT EXISTS accepted_replacement TEXT",
+                "ALTER TABLE content_audit_items ADD COLUMN IF NOT EXISTS relevance TEXT",
+                "ALTER TABLE content_audit_items ADD COLUMN IF NOT EXISTS evidence_type TEXT",
+                "ALTER TABLE content_audit_items ADD COLUMN IF NOT EXISTS evidence_explanation TEXT",
+                "ALTER TABLE content_audit_items ADD COLUMN IF NOT EXISTS suggested_action TEXT",
+                "ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS gap_addressed TEXT",
+                "ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS evidence_type TEXT",
+                "ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS evidence_explanation TEXT",
+                "ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS reasoning TEXT",
+                "ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS impact TEXT",
+            ]:
+                conn.execute(text(stmt))
         else:
-            rows = conn.execute(text("PRAGMA table_info(content_audit_items)")).fetchall()
-            existing = {r[1] for r in rows}
-            if "accepted_replacement" not in existing:
-                conn.execute(text(
-                    "ALTER TABLE content_audit_items ADD COLUMN accepted_replacement TEXT"
-                ))
+            audit_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(content_audit_items)")).fetchall()}
+            sugg_cols  = {r[1] for r in conn.execute(text("PRAGMA table_info(suggestions)")).fetchall()}
+            for col in ["accepted_replacement", "relevance", "evidence_type", "evidence_explanation", "suggested_action"]:
+                if col not in audit_cols:
+                    conn.execute(text(f"ALTER TABLE content_audit_items ADD COLUMN {col} TEXT"))
+            for col in ["gap_addressed", "evidence_type", "evidence_explanation", "reasoning", "impact"]:
+                if col not in sugg_cols:
+                    conn.execute(text(f"ALTER TABLE suggestions ADD COLUMN {col} TEXT"))
         conn.commit()
 
 

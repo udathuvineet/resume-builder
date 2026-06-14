@@ -175,12 +175,35 @@ def _bullets_for_section(resume_bullets: dict[str, list[str]], section: str) -> 
     return [b for bullets in resume_bullets.values() for b in bullets]
 
 
+_IMPACT_ICON = {"high": "🔴", "medium": "🟡", "low": "⚪"}
+_EVIDENCE_ICON = {"direct": "🟢", "inferred": "🟡", "no_evidence": "🔴"}
+_EVIDENCE_LABEL = {"direct": "Direct evidence", "inferred": "Inferred", "no_evidence": "⚠️ No evidence"}
+
+
 def _render_suggestion(sugg: dict, resume_bullets: dict[str, list[str]]):
     sugg_id  = sugg["id"]
     sel_key  = f"sel_{sugg_id}"
     edit_key = f"edit_{sugg_id}"
     section  = sugg.get("section") or "General"
     is_add   = sugg["type"] == "ADD"
+    ev       = sugg.get("evidence_type")
+    impact   = sugg.get("impact")
+
+    # ── Evidence / impact badges ──────────────────────────────────────────────
+    badge_parts = []
+    if impact:
+        badge_parts.append(f"{_IMPACT_ICON.get(impact, '⚪')} {impact.capitalize()} impact")
+    if ev:
+        badge_parts.append(f"{_EVIDENCE_ICON.get(ev, '⚪')} {_EVIDENCE_LABEL.get(ev, ev)}")
+    if badge_parts:
+        st.caption(" · ".join(badge_parts))
+
+    # ── No-evidence warning for ADD ───────────────────────────────────────────
+    if is_add and ev == "no_evidence":
+        st.warning(
+            "⚠️ No evidence found in your resume. Only accept if you genuinely have this experience.",
+            icon=None,
+        )
 
     col_check, col_label = st.columns([1, 10])
     action_label = "Add to" if is_add else "Modify"
@@ -193,6 +216,19 @@ def _render_suggestion(sugg: dict, resume_bullets: dict[str, list[str]]):
         f"**{action_label}** — `{section}`  \n"
         f"{sugg['suggested_text']}"
     )
+
+    # ── Gap + reasoning (collapsed) ───────────────────────────────────────────
+    gap = sugg.get("gap_addressed")
+    reasoning = sugg.get("reasoning")
+    evidence_exp = sugg.get("evidence_explanation")
+    if gap or reasoning or evidence_exp:
+        with st.expander("💡 Why this change?", expanded=False):
+            if gap:
+                st.caption(f"**Addresses:** {gap}")
+            if evidence_exp:
+                st.caption(f"**Evidence:** {evidence_exp}")
+            if reasoning:
+                st.write(reasoning)
 
     active = is_checked or st.session_state.get(sel_key, sugg["is_selected"])
     if not active:
@@ -333,14 +369,19 @@ def render():
         )
         suggs = db.query(Suggestion).filter_by(session_id=selected_id).all()
 
+        # Exclude sentinel requirements from metrics
         all_reqs_data = [{
             "id": r.id, "text": r.text, "category": r.category,
             "match_score": r.match_score, "match_detail": r.match_detail,
-        } for r in all_reqs]
+        } for r in all_reqs if r.category != "sentinel"]
 
-        suggs_by_req: dict[str, list[dict]] = {}
+        req_map = {r.id: r.text for r in all_reqs if r.category != "sentinel"}
+
+        # Section-based grouping for all suggestions (works for old and new sessions)
+        suggs_by_section: dict[str, list[dict]] = {}
         for s in suggs:
-            suggs_by_req.setdefault(s.requirement_id, []).append({
+            sec = s.section or "General"
+            suggs_by_section.setdefault(sec, []).append({
                 "id": s.id,
                 "type": s.type.value,
                 "original_text": s.original_text,
@@ -348,7 +389,17 @@ def render():
                 "edited_text": s.edited_text,
                 "is_selected": s.is_selected,
                 "section": s.section,
+                "gap_addressed": s.gap_addressed or req_map.get(s.requirement_id, ""),
+                "evidence_type": s.evidence_type,
+                "evidence_explanation": s.evidence_explanation,
+                "reasoning": s.reasoning,
+                "impact": s.impact,
             })
+
+        # Keep suggs_by_req for selected-count metric
+        suggs_by_req: dict[str, list[dict]] = {}
+        for s in suggs:
+            suggs_by_req.setdefault(s.requirement_id, []).append({"is_selected": s.is_selected})
 
         jd_text = session.job_description or ""
 
@@ -364,6 +415,10 @@ def render():
             "text": a.text,
             "verdict": a.verdict.value,
             "reason": a.reason,
+            "relevance": a.relevance,
+            "evidence_type": a.evidence_type,
+            "evidence_explanation": a.evidence_explanation,
+            "suggested_action": a.suggested_action,
         } for a in audit_rows]
 
         # Items already actioned (dismissed with an accepted_replacement)
@@ -431,62 +486,48 @@ def render():
 
     st.divider()
 
-    if not gap_reqs:
-        st.success("No gaps found — your resume matches all extracted requirements well.")
-        return
+    # ── Requirements breakdown (collapsed) ────────────────────────────────────
+    gap_reqs     = [r for r in all_reqs_data if r["match_score"] < 0.8]
+    matched_reqs = [r for r in all_reqs_data if r["match_score"] >= 0.8]
+    with st.expander(
+        f"📊 Requirements breakdown — {len(gap_reqs)} below threshold · {len(matched_reqs)} strong",
+        expanded=False,
+    ):
+        for req in sorted(all_reqs_data, key=lambda r: r["match_score"]):
+            score = req["match_score"]
+            st.markdown(f"{_score_icon(score)} **{req['text'][:100]}** — {score:.0%}")
+            st.caption(f"`{req['category']}` — {req['match_detail']}")
 
-    st.subheader(f"Gaps & Suggestions ({len(gap_reqs)})")
-    st.caption(
-        "Check a suggestion to accept it. "
-        "For additions, choose whether to add a new bullet or weave into an existing one."
-    )
+    # ── Suggested changes by section ──────────────────────────────────────────
+    all_sugg_count = sum(len(v) for v in suggs_by_section.values())
+    _IMPACT_ORDER = {"high": 0, "medium": 1, "low": 2}
 
-    for req in gap_reqs:
-        req_suggs = suggs_by_req.get(req["id"], [])
-        score = req["match_score"]
-        title = f"{_score_icon(score)} {req['text'][:90]}{'...' if len(req['text']) > 90 else ''} — {score:.0%}"
+    if suggs_by_section:
+        st.subheader(f"Suggested Changes ({all_sugg_count})")
+        st.caption(
+            "High-impact suggestions appear first within each section. "
+            "Check a suggestion to accept it. For additions, weave into an existing bullet or add new."
+        )
 
-        with st.expander(title, expanded=(score < 0.5)):
-            st.markdown(f"**{req['text']}**")
-            st.caption(f"Category: `{req['category']}`  •  Score: {score:.0%}")
-            st.markdown(f"*{req['match_detail']}*")
-            st.markdown("---")
-            if req_suggs:
-                for sugg in req_suggs:
-                    _render_suggestion(sugg, resume_bullets)
-            else:
-                st.caption("No suggestions generated for this gap yet.")
-                if st.button("Generate suggestion", key=f"gen_gap_{req['id']}",
-                             use_container_width=False):
-                    with st.spinner("Generating suggestion…"):
-                        _generate_improvement_for_req(req, selected_id, resume_texts)
-                    st.rerun()
-
-    # ── Strong matches ────────────────────────────────────────────────────────
-    if matched_reqs:
-        st.divider()
-        with st.expander(f"✅ Strong Matches ({len(matched_reqs)}) — click to expand", expanded=False):
-            st.caption(
-                "Your resume already covers these well. "
-                "Click **Get improvement suggestion** on any to squeeze out extra points."
+        for section in sorted(suggs_by_section.keys()):
+            section_suggs = sorted(
+                suggs_by_section[section],
+                key=lambda s: (_IMPACT_ORDER.get(s.get("impact"), 3), 0 if s["type"] == "MODIFY" else 1),
             )
-            for req in sorted(matched_reqs, key=lambda r: r["match_score"], reverse=True):
-                score = req["match_score"]
-                req_suggs = suggs_by_req.get(req["id"], [])
-                col_info, col_btn = st.columns([8, 2])
-                with col_info:
-                    st.markdown(f"**{req['text']}**")
-                    st.caption(f"`{req['category']}`  •  {score:.0%}  •  {req['match_detail']}")
-                with col_btn:
-                    if st.button("Improve further", key=f"improve_{req['id']}",
-                                 use_container_width=True):
-                        with st.spinner("Generating suggestion…"):
-                            _generate_improvement_for_req(req, selected_id, resume_texts)
-                        st.rerun()
-                if req_suggs:
-                    for sugg in req_suggs:
-                        _render_suggestion(sugg, resume_bullets)
-                st.markdown("")
+            mod_n = sum(1 for s in section_suggs if s["type"] == "MODIFY")
+            add_n = sum(1 for s in section_suggs if s["type"] == "ADD")
+            parts = []
+            if mod_n:
+                parts.append(f"{mod_n} modification{'s' if mod_n > 1 else ''}")
+            if add_n:
+                parts.append(f"{add_n} addition{'s' if add_n > 1 else ''}")
+
+            with st.expander(f"**{section}** — {', '.join(parts)}", expanded=True):
+                for sugg in section_suggs:
+                    _render_suggestion(sugg, resume_bullets)
+                    st.markdown("---")
+    else:
+        st.success("No suggestions generated — your resume looks well-aligned with this role.")
 
     # ── Content audit ─────────────────────────────────────────────────────────
     if audit_data or accepted_audit_data:
@@ -500,9 +541,12 @@ def render():
             "Remove or rephrase them to strengthen the fit."
         )
 
-        _VERDICT_STYLE = {
-            "remove":   ("🔴", "Remove",   "#dc3545"),
-            "rephrase": ("🟡", "Rephrase", "#e6a817"),
+        # suggested_action overrides old verdict for new sessions
+        _ACTION_STYLE = {
+            "remove":  ("🔴", "Remove",   "#dc3545"),
+            "shorten": ("🟡", "Shorten",  "#e6a817"),
+            "merge":   ("🟡", "Merge",    "#e6a817"),
+            "rephrase":("🟡", "Rephrase", "#e6a817"),  # backward compat
         }
 
         if audit_data:
@@ -513,19 +557,33 @@ def render():
             for section, items in sorted(by_section.items()):
                 with st.expander(f"**{section}** — {len(items)} item(s)", expanded=True):
                     for item in items:
-                        icon, label, color = _VERDICT_STYLE.get(
-                            item["verdict"], ("⚪", item["verdict"].title(), "#888")
+                        action = item.get("suggested_action") or item["verdict"]
+                        icon, label, color = _ACTION_STYLE.get(
+                            action, ("⚪", action.title(), "#888")
                         )
-                        st.markdown(
-                            f"<span style='color:{color};font-weight:bold'>{icon} {label}</span>",
-                            unsafe_allow_html=True,
-                        )
+                        # Header row: action badge + relevance
+                        badge_parts = [f"<span style='color:{color};font-weight:bold'>{icon} {label}</span>"]
+                        rel = item.get("relevance")
+                        if rel:
+                            rel_icon = {"high": "🔴", "medium": "🟡", "low": "⚪"}.get(rel, "⚪")
+                            badge_parts.append(f"<span style='color:#888'>{rel_icon} {rel.capitalize()} relevance</span>")
+                        ev = item.get("evidence_type")
+                        if ev:
+                            badge_parts.append(
+                                f"<span style='color:#888'>{_EVIDENCE_ICON.get(ev,'⚪')} {_EVIDENCE_LABEL.get(ev,ev)}</span>"
+                            )
+                        st.markdown(" · ".join(badge_parts), unsafe_allow_html=True)
+
                         st.markdown(f"**{item['text']}**")
-                        st.caption(item["reason"])
+
+                        reason_parts = [item["reason"]]
+                        if item.get("evidence_explanation"):
+                            reason_parts.append(f"*Evidence: {item['evidence_explanation']}*")
+                        st.caption("  \n".join(reason_parts))
 
                         rephrase_key = f"rephrase_draft_{item['id']}"
 
-                        if item["verdict"] == "remove":
+                        if action == "remove":
                             col_rm, col_dis, _ = st.columns([2, 2, 6])
                             if col_rm.button("🗑 Remove from resume",
                                              key=f"rm_{item['id']}",
@@ -537,12 +595,14 @@ def render():
                                 _dismiss_audit(item["id"])
                                 st.rerun()
 
-                        else:  # rephrase
+                        else:  # shorten / merge / rephrase
+                            btn_label = {"shorten": "✂️ Generate shortened", "merge": "🔀 Generate merged"}.get(
+                                action, "✏️ Generate rephrase"
+                            )
                             col_rp, col_dis, _ = st.columns([2, 2, 6])
-                            if col_rp.button("✏️ Generate rephrase",
-                                             key=f"rp_{item['id']}",
+                            if col_rp.button(btn_label, key=f"rp_{item['id']}",
                                              use_container_width=True):
-                                with st.spinner("Generating rephrase…"):
+                                with st.spinner("Generating revision…"):
                                     draft = ai_service.rephrase_bullet_for_jd(
                                         item["text"], jd_text, item["section"]
                                     )
@@ -555,12 +615,12 @@ def render():
 
                             if rephrase_key in st.session_state:
                                 edited = st.text_area(
-                                    "Rephrased version (edit if needed)",
+                                    "Revised version (edit if needed)",
                                     value=st.session_state[rephrase_key],
                                     height=80,
                                     key=f"rp_edit_{item['id']}",
                                 )
-                                if st.button("✅ Accept rephrase",
+                                if st.button("✅ Accept revision",
                                              key=f"rp_accept_{item['id']}"):
                                     _accept_audit_rephrase(item["id"], edited)
                                     st.session_state.pop(rephrase_key, None)

@@ -62,25 +62,67 @@ Return ONLY a valid JSON object (no markdown fences):
 
 Use the exact requirement IDs provided. Be specific and ATS-optimized."""
 
-_AUDIT_SYSTEM = """You are an expert resume coach. Given a resume and a job description, evaluate every bullet point and statement in the resume.
+_DETAILED_REVIEW_SYSTEM = """You are an expert resume reviewer and career coach. Analyze a resume against a job description with precision and honesty.
 
-For each item decide:
-- "rephrase": content is relevant but generic, vague, or not worded to match this JD's language/priorities
-- "remove": content is irrelevant to this role and wastes space
+Compare across these dimensions: Technical Skills, Experience & Responsibilities, Business Impact, Domain Knowledge, Leadership & Collaboration, Methodologies & Processes.
 
-Only return items that need attention — skip anything that is strong and well-targeted.
+STRICT RULES — no exceptions:
+- Do NOT fabricate experience, technologies, projects, metrics, certifications, or responsibilities
+- Preserve original meaning in all modifications; only improve wording, clarity, measurable impact, and JD alignment
+- For additions with no_evidence: set suggested_bullet to null
+- Every recommendation must have clear evidence and reasoning
 
 Return ONLY valid JSON (no markdown fences):
 {
-  "audit": [
+  "modifications": [
     {
-      "section": "Experience | Skills | Summary | Education | etc.",
-      "text": "exact text of the bullet or statement from the resume",
-      "verdict": "rephrase | remove",
-      "reason": "specific explanation of the problem and what to do instead"
+      "current_text": "exact bullet or statement from resume",
+      "suggested_revision": "revised version — stronger wording, clearer ownership, better JD alignment",
+      "section": "Experience|Summary|Skills|Education|Projects",
+      "gap_addressed": "specific JD requirement, keyword, or outcome this better represents",
+      "evidence_type": "direct|inferred|no_evidence",
+      "evidence_explanation": "one sentence: what in the resume supports this change",
+      "reasoning": "why this revision is stronger — what improves: clarity / impact / alignment / keywords",
+      "impact": "high|medium|low"
+    }
+  ],
+  "additions": [
+    {
+      "jd_requirement": "specific requirement or skill missing or underrepresented in resume",
+      "section": "Skills|Experience|Summary|Projects",
+      "relevance": "high|medium|low",
+      "evidence_type": "direct|inferred|no_evidence",
+      "evidence_explanation": "what evidence exists in the resume — or explicitly state there is none",
+      "reasoning": "why this requirement matters for the role and what gap exists in the current resume",
+      "suggested_bullet": "truthful bullet text if direct or inferred evidence supports it — null if no_evidence"
+    }
+  ],
+  "removals": [
+    {
+      "resume_point": "exact text of the bullet or statement to reconsider",
+      "section": "Experience|Skills|Summary|Education",
+      "relevance": "high|medium|low",
+      "evidence_type": "direct|inferred|no_evidence",
+      "evidence_explanation": "why this content is or is not relevant to the target role",
+      "reasoning": "why to reconsider: redundant / outdated / unrelated / too weak",
+      "suggested_action": "remove|shorten|merge"
     }
   ]
-}"""
+}
+
+evidence_type definitions:
+- "direct": explicitly and clearly present in the resume
+- "inferred": likely true given the context but not explicitly stated
+- "no_evidence": not supported by the resume — do not fabricate
+
+impact / relevance scale:
+- "high": significant effect on recruiter relevance, ATS scoring, or interview conversion
+- "medium": moderate improvement
+- "low": minor polish
+
+Optimize for truthful representation of experience. Only suggest additions where the candidate plausibly has the experience."""
+
+_AUDIT_SYSTEM = _DETAILED_REVIEW_SYSTEM  # alias kept for backward compat — not called in new flow
 
 _GPT4_SUGGESTIONS_SYSTEM = """You are an expert resume writer and ATS optimizer. Generate specific, actionable suggestions to improve how a resume matches a job description.
 
@@ -182,6 +224,34 @@ def generate_suggestions(requirements: list[dict], resume_texts: list[str]) -> d
                 f"Requirements needing improvement:\n{reqs_block}\n\n"
                 f"Resume:\n{resume_block}\n\n"
                 "Generate suggestions and return JSON."
+            )
+        }]
+    )
+    return _parse_json(response.content[0].text)
+
+
+def review_resume_detailed(
+    resume_texts: list[str],
+    jd_text: str,
+    requirements: list[dict],
+) -> dict:
+    """Unified review: modifications + additions + removals with evidence and impact ratings."""
+    resume_block = "\n\n---\n\n".join(f"[Resume {i+1}]\n{t}" for i, t in enumerate(resume_texts))
+    reqs_block = "\n".join(
+        f"- [{r.get('category', 'general')}] {r['text']} (current match: {r['match_score']:.0%})"
+        for r in requirements
+    )
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=8000,
+        system=_DETAILED_REVIEW_SYSTEM,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Job Description:\n{jd_text}\n\n"
+                f"Requirements already identified (use for context):\n{reqs_block}\n\n"
+                f"Resume:\n{resume_block}\n\n"
+                "Perform a detailed review across all dimensions and return JSON."
             )
         }]
     )

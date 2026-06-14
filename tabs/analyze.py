@@ -112,64 +112,89 @@ def _run_analysis(jd: str, resume_texts: list[str], projects_texts: list[str]):
                 session.status = SessionStatus.READY
                 session.overall_score = overall_score
 
-            # ── Step 2: generate suggestions for gaps ─────────────────────────
-            needs_suggestions = [r for r in saved_reqs if r["match_score"] < _SUGGESTION_THRESHOLD]
+            # ── Step 2: detailed review (modifications + additions + removals) ──
+            st.write("Running detailed review — modifications, additions, and removals...")
+            review_result = ai_service.review_resume_detailed(resume_texts, jd, saved_reqs)
 
-            if needs_suggestions:
-                st.write(f"Generating suggestions for **{len(needs_suggestions)}** gaps...")
-                sugg_result = ai_service.generate_suggestions(needs_suggestions, resume_texts)
-                by_req = sugg_result.get("suggestions_by_requirement", {})
+            modifications = review_result.get("modifications", [])
+            additions     = review_result.get("additions", [])
+            removals      = review_result.get("removals", [])
 
-                valid_ids = {r["id"] for r in needs_suggestions}
-                with get_db() as db:
-                    for req_id, suggs in by_req.items():
-                        if req_id not in valid_ids:
-                            continue
-                        for s in suggs:
-                            db.add(Suggestion(
-                                id=str(uuid.uuid4()),
-                                session_id=session_id,
-                                requirement_id=req_id,
-                                original_text=s.get("original_text"),
-                                suggested_text=s.get("suggested_text", ""),
-                                type=SuggestionType(s.get("type", "MODIFY")),
-                                section=s.get("section"),
-                            ))
+            # Sentinel requirement anchors all detailed-review suggestions (FK is NOT NULL)
+            sentinel_id = str(uuid.uuid4())
+            with get_db() as db:
+                db.add(Requirement(
+                    id=sentinel_id,
+                    session_id=session_id,
+                    text="[Detailed Review]",
+                    category="sentinel",
+                    match_score=0.0,
+                    match_detail="",
+                    order=9999,
+                ))
 
-                    s = db.query(AnalysisSession).filter_by(id=session_id).first()
-                    s.status = SessionStatus.COMPLETE
+                for m in modifications:
+                    text = m.get("suggested_revision", "")
+                    if not text:
+                        continue
+                    db.add(Suggestion(
+                        id=str(uuid.uuid4()),
+                        session_id=session_id,
+                        requirement_id=sentinel_id,
+                        original_text=m.get("current_text"),
+                        suggested_text=text,
+                        type=SuggestionType.MODIFY,
+                        section=m.get("section"),
+                        gap_addressed=m.get("gap_addressed"),
+                        evidence_type=m.get("evidence_type"),
+                        evidence_explanation=m.get("evidence_explanation"),
+                        reasoning=m.get("reasoning"),
+                        impact=m.get("impact"),
+                    ))
 
-            else:
-                with get_db() as db:
-                    s = db.query(AnalysisSession).filter_by(id=session_id).first()
-                    s.status = SessionStatus.COMPLETE
+                for a in additions:
+                    bullet = a.get("suggested_bullet")
+                    if not bullet:
+                        # No evidence — save as placeholder so user sees the gap
+                        bullet = f"[No evidence — {a.get('jd_requirement', 'gap')}]"
+                    db.add(Suggestion(
+                        id=str(uuid.uuid4()),
+                        session_id=session_id,
+                        requirement_id=sentinel_id,
+                        original_text=None,
+                        suggested_text=bullet,
+                        type=SuggestionType.ADD,
+                        section=a.get("section"),
+                        gap_addressed=a.get("jd_requirement"),
+                        evidence_type=a.get("evidence_type"),
+                        evidence_explanation=a.get("evidence_explanation"),
+                        reasoning=a.get("reasoning"),
+                        impact=a.get("relevance"),
+                    ))
 
-            # ── Step 3: content audit ─────────────────────────────────────────
-            st.write("Auditing existing resume content for relevance...")
-            try:
-                audit_result = ai_service.audit_resume_content(
-                    resume_texts[0], jd
-                )
-                audit_items = audit_result.get("audit", [])
-                valid_verdicts = {v.value for v in AuditVerdict}
-                with get_db() as db:
-                    for item in audit_items:
-                        v = item.get("verdict", "").lower()
-                        if v not in valid_verdicts:
-                            continue
-                        db.add(ContentAuditItem(
-                            id=str(uuid.uuid4()),
-                            session_id=session_id,
-                            section=item.get("section"),
-                            text=item.get("text", ""),
-                            verdict=AuditVerdict(v),
-                            reason=item.get("reason", ""),
-                        ))
-                flagged = len([i for i in audit_items
-                               if i.get("verdict", "").lower() in valid_verdicts])
-                st.write(f"Flagged **{flagged}** existing bullet(s) for review.")
-            except Exception as audit_exc:
-                st.warning(f"Content audit skipped: {audit_exc}")
+                for r in removals:
+                    action = r.get("suggested_action", "remove").lower()
+                    if action not in ("remove", "shorten", "merge"):
+                        continue
+                    db.add(ContentAuditItem(
+                        id=str(uuid.uuid4()),
+                        session_id=session_id,
+                        section=r.get("section"),
+                        text=r.get("resume_point", ""),
+                        verdict=AuditVerdict.REMOVE,
+                        reason=r.get("reasoning", ""),
+                        relevance=r.get("relevance"),
+                        evidence_type=r.get("evidence_type"),
+                        evidence_explanation=r.get("evidence_explanation"),
+                        suggested_action=action,
+                    ))
+
+                s = db.query(AnalysisSession).filter_by(id=session_id).first()
+                s.status = SessionStatus.COMPLETE
+
+            total_sugg = len(modifications) + len(additions)
+            total_rm   = len([r for r in removals if r.get("suggested_action") in ("remove", "shorten", "merge")])
+            st.write(f"Generated **{total_sugg}** suggestions and **{total_rm}** removal recommendations.")
 
             # Keep only the 10 most recent sessions
             with get_db() as db:

@@ -70,6 +70,9 @@ def _run_analysis(jd: str, resume_texts: list[str], projects_texts: list[str]):
         ))
 
     st.session_state["current_session_id"] = session_id
+    # Clear selectbox widget state in other tabs so they pick up the new session
+    for _k in ["session_select_review", "session_select_refine", "session_select_generate"]:
+        st.session_state.pop(_k, None)
 
     with st.status("Running analysis...", expanded=True) as status_widget:
         try:

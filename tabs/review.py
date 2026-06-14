@@ -1,9 +1,11 @@
 import plotly.graph_objects as go
 import streamlit as st
 
+import uuid
+
 from database.db import get_db
 from database.models import (AnalysisSession, AuditVerdict, ContentAuditItem,
-                              Requirement, Resume, Suggestion)
+                              Requirement, Resume, Suggestion, SuggestionType)
 from services import ai_service
 from services.resume_generator import _label_lines
 
@@ -62,6 +64,26 @@ def _clear_weave_original(sugg_id: str):
         if s:
             s.original_text = None
             s.edited_text = None
+
+
+def _generate_improvement_for_req(req: dict, session_id: str, resume_texts: list[str]):
+    """Generate and save improvement suggestions for an already-matching requirement."""
+    result = ai_service.generate_suggestions([req], resume_texts)
+    by_req = result.get("suggestions_by_requirement", {})
+    with get_db() as db:
+        for suggs in by_req.values():
+            for s in suggs:
+                db.add(Suggestion(
+                    id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    requirement_id=req["id"],
+                    original_text=s.get("original_text"),
+                    suggested_text=s.get("suggested_text", ""),
+                    type=SuggestionType(s.get("type", "MODIFY").upper()
+                                        if s.get("type", "MODIFY").upper() in ("MODIFY", "ADD")
+                                        else "MODIFY"),
+                    section=s.get("section"),
+                ))
 
 
 def _save_ai_merge(sugg_id: str, merged: str):
@@ -280,12 +302,14 @@ def render():
             "reason": a.reason,
         } for a in audit_rows]
 
-        # Primary resume for weave bullet list
-        primary_resume = db.query(Resume).order_by(Resume.order).first()
-        resume_text = primary_resume.content if primary_resume else ""
+        resumes = db.query(Resume).order_by(Resume.order).all()
+        resume_texts = [r.content for r in resumes]
+        resume_text = resume_texts[0] if resume_texts else ""
 
     resume_bullets = _parse_resume_bullets(resume_text)
-    gap_reqs = [r for r in all_reqs_data if r["id"] in suggs_by_req]
+    gap_reqs     = [r for r in all_reqs_data if r["id"] in suggs_by_req]
+    matched_reqs = [r for r in all_reqs_data
+                    if r["match_score"] >= 0.75 and r["id"] not in suggs_by_req]
 
     # ── Score summary ─────────────────────────────────────────────────────────
     col_gauge, col_metrics = st.columns([1, 2])
@@ -346,6 +370,28 @@ def render():
             st.markdown("---")
             for sugg in req_suggs:
                 _render_suggestion(sugg, resume_bullets)
+
+    # ── Strong matches ────────────────────────────────────────────────────────
+    if matched_reqs:
+        st.divider()
+        with st.expander(f"✅ Strong Matches ({len(matched_reqs)}) — click to expand", expanded=False):
+            st.caption(
+                "Your resume already covers these well. "
+                "Click **Get improvement suggestion** on any to squeeze out extra points."
+            )
+            for req in sorted(matched_reqs, key=lambda r: r["match_score"], reverse=True):
+                score = req["match_score"]
+                col_info, col_btn = st.columns([8, 2])
+                with col_info:
+                    st.markdown(f"**{req['text']}**")
+                    st.caption(f"`{req['category']}`  •  {score:.0%}  •  {req['match_detail']}")
+                with col_btn:
+                    if st.button("Improve further", key=f"improve_{req['id']}",
+                                 use_container_width=True):
+                        with st.spinner("Generating suggestion…"):
+                            _generate_improvement_for_req(req, selected_id, resume_texts)
+                        st.rerun()
+                st.markdown("")
 
     # ── Content audit ─────────────────────────────────────────────────────────
     if audit_data:

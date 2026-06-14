@@ -217,18 +217,25 @@ def _render_suggestion(sugg: dict, resume_bullets: dict[str, list[str]]):
         f"{sugg['suggested_text']}"
     )
 
-    # ── Gap + reasoning (collapsed) ───────────────────────────────────────────
+    # ── Gap + reasoning (collapsed via HTML — expanders can't nest) ──────────
     gap = sugg.get("gap_addressed")
     reasoning = sugg.get("reasoning")
     evidence_exp = sugg.get("evidence_explanation")
     if gap or reasoning or evidence_exp:
-        with st.expander("💡 Why this change?", expanded=False):
-            if gap:
-                st.caption(f"**Addresses:** {gap}")
-            if evidence_exp:
-                st.caption(f"**Evidence:** {evidence_exp}")
-            if reasoning:
-                st.write(reasoning)
+        inner = ""
+        if gap:
+            inner += f"<p style='margin:4px 0'><b>Addresses:</b> {gap}</p>"
+        if evidence_exp:
+            inner += f"<p style='margin:4px 0'><b>Evidence:</b> {evidence_exp}</p>"
+        if reasoning:
+            inner += f"<p style='margin:4px 0'>{reasoning}</p>"
+        st.markdown(
+            f"<details style='font-size:0.85em;color:#aaa;margin-bottom:4px'>"
+            f"<summary style='cursor:pointer'>💡 Why this change?</summary>"
+            f"<div style='padding:6px 0'>{inner}</div>"
+            f"</details>",
+            unsafe_allow_html=True,
+        )
 
     active = is_checked or st.session_state.get(sel_key, sugg["is_selected"])
     if not active:

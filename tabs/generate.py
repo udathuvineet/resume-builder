@@ -147,6 +147,8 @@ def render():
             "linkedin": profile_row.linkedin or "" if profile_row else "",
             "location": profile_row.location or "" if profile_row else "",
         }
+        session_row = db.query(AnalysisSession).filter_by(id=selected_id).first()
+        jd_text = session_row.job_description if session_row else ""
 
     claude_count = len(selected_suggs)
     gpt4_count = len(selected_gpt4)
@@ -170,7 +172,7 @@ def render():
 
         st.subheader("Generated Resume")
         generated = st.write_stream(
-            ai_service.stream_resume_generation(primary_resume, sugg_data, profile)
+            ai_service.stream_resume_generation(primary_resume, sugg_data, profile, jd_text)
         )
         st.session_state["generated_resume"] = generated
         st.session_state["generated_resume_source"] = (primary_bytes, primary_filename)

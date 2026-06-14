@@ -124,6 +124,13 @@ Language rules — write natural business English:
 - No mid-sentence hyphens connecting thoughts (e.g. avoid "led the team - resulting in")
 - Use clear, direct sentences with strong action verbs (built, reduced, shipped, led, grew, cut)
 
+Title alignment rule:
+- Read the job description to identify the target role title and seniority level
+- Adjust the job titles in the EXPERIENCE section to match what is most appropriate for this role
+  (e.g. if the role is "Data Analyst", use "Data Analyst" not "Data Scientist" where the work fits)
+- Only change titles where the underlying work genuinely matches the target role type
+- Do not inflate or deflate seniority levels beyond what the content supports
+
 Strict format:
 1. Line 1: Full name only
 2. Line 2: contact info separated by  |  (use the same separator as the original)
@@ -274,6 +281,7 @@ def stream_resume_generation(
     original_resume: str,
     accepted_suggestions: list[dict],
     profile: dict | None = None,
+    jd_text: str = "",
 ) -> Generator[str, None, None]:
     improvements = "\n\n".join(
         f"{'MODIFY' if s['type'] == 'MODIFY' else 'ADD'} in {s.get('section', 'resume')}:\n"
@@ -299,10 +307,13 @@ def stream_resume_generation(
                     "\n(Replace · with the same separator used in the original resume if different)"
                 )
 
+    jd_block = f"\n\nJob Description (for title alignment):\n{jd_text}" if jd_text else ""
+
     prompt = (
         f"Original Resume:\n{original_resume}\n\n"
         f"Improvements to apply:\n{improvements}"
-        f"{contact_note}\n\n"
+        f"{contact_note}"
+        f"{jd_block}\n\n"
         "Write the complete updated resume."
     )
 

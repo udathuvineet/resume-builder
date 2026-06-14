@@ -6,8 +6,8 @@ import streamlit as st
 
 from database.db import get_db
 from database.models import (AnalysisSession, GPT4MatchResult, GPT4Suggestion,
-                              RefineVerdict, RefinedSuggestion, Requirement,
-                              Resume, Suggestion, SuggestionType)
+                              ProjectsDocument, RefineVerdict, RefinedSuggestion,
+                              Requirement, Resume, Suggestion, SuggestionType)
 from services import ai_service
 from services.resume_generator import _label_lines
 
@@ -26,11 +26,30 @@ def _score_color(s: float) -> str:
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
+_CONTEXT_DOC_NAME = "accepted_additions.txt"
+
+
+def _append_to_context(text: str, section: str, db):
+    line = f"[{section}] {text.strip()}"
+    doc = db.query(ProjectsDocument).filter_by(filename=_CONTEXT_DOC_NAME).first()
+    if doc:
+        doc.content = doc.content + "\n" + line
+    else:
+        db.add(ProjectsDocument(
+            id=str(uuid.uuid4()),
+            filename=_CONTEXT_DOC_NAME,
+            content=line,
+        ))
+
+
 def _toggle_gpt4_sugg(sugg_id: str, key: str):
     with get_db() as db:
         s = db.query(GPT4Suggestion).filter_by(id=sugg_id).first()
         if s:
             s.is_selected = st.session_state[key]
+            if s.is_selected and s.type.value == "ADD":
+                text = s.edited_text or s.suggested_text or ""
+                _append_to_context(text, s.section or "General", db)
 
 
 def _save_gpt4_edit(sugg_id: str, key: str):

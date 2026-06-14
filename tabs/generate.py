@@ -63,6 +63,10 @@ def _render_prep_summary(sugg_data: list[dict], req_map: dict[str, str]):
 
 def render():
     st.header("Generate")
+    st.caption(
+        "Generates using all accepted suggestions from the Review tab. "
+        "The Refine tab is optional — skip it if you don't need GPT-4o suggestions."
+    )
 
     # ── Session selector ──────────────────────────────────────────────────────
     with get_db() as db:

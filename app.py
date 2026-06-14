@@ -16,7 +16,7 @@ st.title("Resume Builder")
 st.caption("AI-powered resume optimization — upload, analyze, review, and download.")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📚 Library", "🔍 Analyze", "📝 Review", "🤖 Refine", "⬇ Generate"]
+    ["📚 Library", "🔍 Analyze", "📝 Review", "🤖 Refine (Optional)", "⬇ Generate"]
 )
 
 with tab1:

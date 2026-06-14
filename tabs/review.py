@@ -61,6 +61,30 @@ def _dismiss_audit(item_id: str):
             item.is_dismissed = True
 
 
+def _accept_audit_removal(item_id: str):
+    with get_db() as db:
+        item = db.query(ContentAuditItem).filter_by(id=item_id).first()
+        if item:
+            item.accepted_replacement = ""   # empty string = remove
+            item.is_dismissed = True
+
+
+def _accept_audit_rephrase(item_id: str, replacement: str):
+    with get_db() as db:
+        item = db.query(ContentAuditItem).filter_by(id=item_id).first()
+        if item:
+            item.accepted_replacement = replacement
+            item.is_dismissed = True
+
+
+def _undo_audit_action(item_id: str):
+    with get_db() as db:
+        item = db.query(ContentAuditItem).filter_by(id=item_id).first()
+        if item:
+            item.accepted_replacement = None
+            item.is_dismissed = False
+
+
 def _save_edit(sugg_id: str, key: str):
     with get_db() as db:
         s = db.query(Suggestion).filter_by(id=sugg_id).first()
@@ -115,18 +139,29 @@ def _save_ai_merge(sugg_id: str, merged: str):
 
 
 def _parse_resume_bullets(resume_text: str) -> dict[str, list[str]]:
-    """Return {SECTION_NAME: [bullet/body lines]} parsed from resume text."""
+    """Return {SECTION_NAME: [full bullet strings]} with continuation lines joined."""
     result: dict[str, list[str]] = {}
     current = "General"
+    prev_label = None
     for line, label in _label_lines(resume_text):
-        # Normalize whitespace so multi-line display artefacts become single lines
         s = " ".join(line.split())
         if not s:
             continue
         if label == "section":
             current = s
-        elif label in ("bullet", "body", "role"):
+            prev_label = label
+        elif label == "bullet":
             result.setdefault(current, []).append(s)
+            prev_label = label
+        elif label == "body":
+            if prev_label in ("bullet", "body") and result.get(current):
+                # Continuation of the previous bullet — join onto it
+                result[current][-1] += " " + s
+            else:
+                result.setdefault(current, []).append(s)
+            prev_label = label
+        else:
+            prev_label = label
     return result
 
 
@@ -315,6 +350,8 @@ def render():
                 "section": s.section,
             })
 
+        jd_text = session.job_description or ""
+
         audit_rows = (
             db.query(ContentAuditItem)
             .filter_by(session_id=selected_id, is_dismissed=False)
@@ -328,6 +365,25 @@ def render():
             "verdict": a.verdict.value,
             "reason": a.reason,
         } for a in audit_rows]
+
+        # Items already actioned (dismissed with an accepted_replacement)
+        accepted_audit_rows = (
+            db.query(ContentAuditItem)
+            .filter(
+                ContentAuditItem.session_id == selected_id,
+                ContentAuditItem.is_dismissed == True,
+                ContentAuditItem.accepted_replacement != None,  # noqa: E711
+            )
+            .order_by(ContentAuditItem.section)
+            .all()
+        )
+        accepted_audit_data = [{
+            "id": a.id,
+            "section": a.section or "General",
+            "text": a.text,
+            "verdict": a.verdict.value,
+            "accepted_replacement": a.accepted_replacement,
+        } for a in accepted_audit_rows]
 
         resumes = db.query(Resume).order_by(Resume.order).all()
         resume_texts = [r.content for r in resumes]
@@ -433,12 +489,15 @@ def render():
                 st.markdown("")
 
     # ── Content audit ─────────────────────────────────────────────────────────
-    if audit_data:
+    if audit_data or accepted_audit_data:
         st.divider()
-        st.subheader(f"Existing Content to Reconsider ({len(audit_data)})")
+        pending_count = len(audit_data)
+        accepted_count = len(accepted_audit_data)
+        st.subheader(f"Existing Content to Reconsider ({pending_count} pending)")
         st.caption(
-            "These are bullets and statements already in your resume that may be "
-            "hurting your match — either too generic or not relevant to this role."
+            "These are bullets and statements in your resume that may be "
+            "hurting your match — either too generic or not relevant to this role. "
+            "Remove or rephrase them to strengthen the fit."
         )
 
         _VERDICT_STYLE = {
@@ -446,25 +505,90 @@ def render():
             "rephrase": ("🟡", "Rephrase", "#e6a817"),
         }
 
-        by_section: dict[str, list[dict]] = {}
-        for item in audit_data:
-            by_section.setdefault(item["section"], []).append(item)
+        if audit_data:
+            by_section: dict[str, list[dict]] = {}
+            for item in audit_data:
+                by_section.setdefault(item["section"], []).append(item)
 
-        for section, items in sorted(by_section.items()):
-            with st.expander(f"**{section}** — {len(items)} item(s)", expanded=True):
-                for item in items:
+            for section, items in sorted(by_section.items()):
+                with st.expander(f"**{section}** — {len(items)} item(s)", expanded=True):
+                    for item in items:
+                        icon, label, color = _VERDICT_STYLE.get(
+                            item["verdict"], ("⚪", item["verdict"].title(), "#888")
+                        )
+                        st.markdown(
+                            f"<span style='color:{color};font-weight:bold'>{icon} {label}</span>",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(f"**{item['text']}**")
+                        st.caption(item["reason"])
+
+                        rephrase_key = f"rephrase_draft_{item['id']}"
+
+                        if item["verdict"] == "remove":
+                            col_rm, col_dis, _ = st.columns([2, 2, 6])
+                            if col_rm.button("🗑 Remove from resume",
+                                             key=f"rm_{item['id']}",
+                                             use_container_width=True):
+                                _accept_audit_removal(item["id"])
+                                st.rerun()
+                            if col_dis.button("✕ Dismiss", key=f"dismiss_{item['id']}",
+                                              use_container_width=True):
+                                _dismiss_audit(item["id"])
+                                st.rerun()
+
+                        else:  # rephrase
+                            col_rp, col_dis, _ = st.columns([2, 2, 6])
+                            if col_rp.button("✏️ Generate rephrase",
+                                             key=f"rp_{item['id']}",
+                                             use_container_width=True):
+                                with st.spinner("Generating rephrase…"):
+                                    draft = ai_service.rephrase_bullet_for_jd(
+                                        item["text"], jd_text, item["section"]
+                                    )
+                                    st.session_state[rephrase_key] = draft
+                                st.rerun()
+                            if col_dis.button("✕ Dismiss", key=f"dismiss_{item['id']}",
+                                              use_container_width=True):
+                                _dismiss_audit(item["id"])
+                                st.rerun()
+
+                            if rephrase_key in st.session_state:
+                                edited = st.text_area(
+                                    "Rephrased version (edit if needed)",
+                                    value=st.session_state[rephrase_key],
+                                    height=80,
+                                    key=f"rp_edit_{item['id']}",
+                                )
+                                if st.button("✅ Accept rephrase",
+                                             key=f"rp_accept_{item['id']}"):
+                                    _accept_audit_rephrase(item["id"], edited)
+                                    st.session_state.pop(rephrase_key, None)
+                                    st.rerun()
+
+                        st.markdown("")
+
+        if accepted_audit_data:
+            with st.expander(
+                f"✅ Accepted audit actions ({accepted_count}) — click to review or undo",
+                expanded=False,
+            ):
+                for item in accepted_audit_data:
                     icon, label, color = _VERDICT_STYLE.get(
                         item["verdict"], ("⚪", item["verdict"].title(), "#888")
                     )
-                    col_badge, col_content, col_dismiss = st.columns([1, 9, 1])
-                    col_badge.markdown(
-                        f"<span style='color:{color};font-weight:bold'>{icon} {label}</span>",
-                        unsafe_allow_html=True,
-                    )
-                    col_content.markdown(f"**{item['text']}**")
-                    col_content.caption(item["reason"])
-                    if col_dismiss.button("✕", key=f"dismiss_{item['id']}",
-                                          help="Dismiss this suggestion"):
-                        _dismiss_audit(item["id"])
+                    rep = item["accepted_replacement"]
+                    if rep == "":
+                        action_str = "🗑 **Marked for removal**"
+                    else:
+                        action_str = f"✏️ **Rephrase accepted:** {rep}"
+
+                    col_info, col_undo = st.columns([9, 1])
+                    with col_info:
+                        st.caption(f"{icon} {label} — original: *{item['text'][:120]}*")
+                        st.markdown(action_str)
+                    if col_undo.button("↩", key=f"undo_{item['id']}",
+                                       help="Undo — put back in pending list"):
+                        _undo_audit_action(item["id"])
                         st.rerun()
                     st.markdown("")

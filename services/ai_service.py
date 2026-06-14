@@ -382,6 +382,31 @@ def refine_suggestions_with_gpt4(
     return _parse_json(response.choices[0].message.content)
 
 
+def rephrase_bullet_for_jd(bullet_text: str, jd_text: str, section: str) -> str:
+    """Rephrase an existing resume bullet to better match the target JD's language."""
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=200,
+        system=(
+            "You are a resume editor. Rephrase an existing resume bullet point to better "
+            "match the language, keywords, and priorities of a specific job description. "
+            "Write in clear, direct business English. "
+            "No em dashes, no AI clichés, no filler words. "
+            "Return ONLY the rephrased bullet — one line, no prefix, no explanation."
+        ),
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Section: {section}\n"
+                f"Original bullet: {bullet_text}\n\n"
+                f"Job Description (key context):\n{jd_text[:1500]}\n\n"
+                "Rephrase the bullet to better match this role's language and priorities."
+            )
+        }]
+    )
+    return response.content[0].text.strip().lstrip("•- ").strip()
+
+
 def suggest_bullet_integration(original_bullet: str, suggestion_text: str, section: str) -> str:
     """Return a single merged bullet combining original_bullet with suggestion_text."""
     response = client.messages.create(

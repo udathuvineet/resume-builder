@@ -4,8 +4,9 @@ from datetime import datetime
 import streamlit as st
 
 from database.db import get_db
-from database.models import (AnalysisSession, GPT4Suggestion, Requirement,
-                              Resume, SessionStatus, Suggestion, UserProfile)
+from database.models import (AnalysisSession, ContentAuditItem, GPT4Suggestion,
+                              Requirement, Resume, SessionStatus, Suggestion,
+                              UserProfile)
 from services import ai_service, resume_generator
 
 
@@ -141,6 +142,28 @@ def render():
             "requirement_id": s.requirement_id,
         } for s in all_selected]
 
+        # Include accepted audit actions (removals + rephrases)
+        accepted_audit = (
+            db.query(ContentAuditItem)
+            .filter(
+                ContentAuditItem.session_id == selected_id,
+                ContentAuditItem.is_dismissed == True,
+                ContentAuditItem.accepted_replacement != None,  # noqa: E711
+            )
+            .all()
+        )
+        audit_actions = [{
+            "type": "MODIFY",
+            "original_text": a.text,
+            "suggested_text": (
+                "[Remove — not relevant to this role]"
+                if a.accepted_replacement == ""
+                else a.accepted_replacement
+            ),
+            "edited_text": None,
+            "section": a.section or "General",
+        } for a in accepted_audit]
+
         if not resumes:
             st.warning("Upload a resume in the **Library** tab first.")
             return
@@ -161,12 +184,16 @@ def render():
 
     claude_count = len(selected_suggs)
     gpt4_count = len(selected_gpt4)
-    col_m1, col_m2, col_m3 = st.columns(3)
-    col_m1.metric("Total accepted", len(sugg_data))
+    audit_count = len(audit_actions)
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    col_m1.metric("Total changes", len(sugg_data) + audit_count)
     col_m2.metric("From Claude", claude_count)
     col_m3.metric("From GPT-4o", gpt4_count)
+    col_m4.metric("Audit actions", audit_count)
 
-    if not sugg_data:
+    all_changes = sugg_data + audit_actions
+
+    if not all_changes:
         st.info(
             "No improvements selected. Go to the **Review** tab to accept suggestions, "
             "or generate the resume as-is below."
@@ -181,11 +208,11 @@ def render():
 
         st.subheader("Generated Resume")
         generated = st.write_stream(
-            ai_service.stream_resume_generation(primary_resume, sugg_data, profile, jd_text)
+            ai_service.stream_resume_generation(primary_resume, all_changes, profile, jd_text)
         )
         st.session_state["generated_resume"] = generated
         st.session_state["generated_resume_source"] = (primary_bytes, primary_filename)
-        st.session_state["generated_sugg_data"] = sugg_data
+        st.session_state["generated_sugg_data"] = all_changes
         st.session_state["generated_req_map"]   = req_map
 
         with get_db() as db:
@@ -198,7 +225,7 @@ def render():
     # ── Prep summary + Download ───────────────────────────────────────────────
     generated_text: str | None = st.session_state.get("generated_resume")
     if generated_text:
-        saved_sugg = st.session_state.get("generated_sugg_data", sugg_data)
+        saved_sugg = st.session_state.get("generated_sugg_data", all_changes)
         saved_reqs = st.session_state.get("generated_req_map", req_map)
 
         _render_prep_summary(saved_sugg, saved_reqs)

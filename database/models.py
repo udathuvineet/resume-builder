@@ -130,6 +130,8 @@ class ContentAuditItem(Base):
     verdict = Column(SAEnum(AuditVerdict), nullable=False)
     reason = Column(Text, nullable=False)
     is_dismissed = Column(Boolean, default=False)
+    # None = pending action, "" = marked for removal, any text = accepted rephrase
+    accepted_replacement = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("AnalysisSession", back_populates="audit_items")

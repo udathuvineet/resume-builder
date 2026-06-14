@@ -641,7 +641,7 @@ def render():
                 expanded=False,
             ):
                 for item in accepted_audit_data:
-                    icon, label, color = _VERDICT_STYLE.get(
+                    icon, label, color = _ACTION_STYLE.get(
                         item["verdict"], ("⚪", item["verdict"].title(), "#888")
                     )
                     rep = item["accepted_replacement"]
